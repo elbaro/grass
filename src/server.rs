@@ -2,8 +2,7 @@ use actix_web::{http::Method, HttpMessage, HttpRequest, HttpResponse, Responder}
 use clone_all::clone_all;
 use crossbeam::{
 	atomic::AtomicCell,
-	channel::{Receiver, Sender},
-	sync::{Parker, Unparker},
+	channel::{unbounded, Sender},
 	thread,
 };
 use decimal::d128;
@@ -11,7 +10,7 @@ use futures::future::Future;
 use futures::stream::Stream;
 use serde::Serialize;
 use serde_json::Value;
-use slog::{error, info};
+use slog::{error, info, warn};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -19,9 +18,10 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use tokio_uds::UnixListener;
 
-enum Message {
-	TrySchedule(String),
-	JobFinished(String),
+// we have a global channel for all queues
+pub enum Message {
+	TrySchedule(String),         // queue name
+	JobFinished(String, String), // queue name, job id
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -101,6 +101,7 @@ pub enum JobStatus {
 	Running,
 	// Completed,
 	// Failed,
+	Finished,
 }
 
 #[derive(Clone, Serialize)]
@@ -162,8 +163,7 @@ impl Job {
 	}
 	fn spawn(
 		&mut self,
-		unparker: Unparker,
-		// s: Sender<Message>,
+		track: Option<(Sender<Message>, String)>,
 	) -> Result<(), Box<std::error::Error>> {
 		self.status = JobStatus::Running;
 		let job: Job = self.clone();
@@ -189,8 +189,10 @@ impl Job {
 				)
 				.current_dir(job.cwd)
 				.status();
-			unparker.unpark();
-			// s.send();
+
+			if let Some((sender, q_name)) = track {
+				let _ = sender.send(Message::JobFinished(q_name, job.id));
+			}
 			Ok(())
 		});
 
@@ -257,7 +259,7 @@ impl Queue {
 		}
 	}
 
-	fn run(&mut self, mut job: Job, unparker: Unparker) {
+	fn run(&mut self, mut job: Job, sender: Sender<Message>) {
 		// decrease availability
 		for (res_type, req) in &job.require {
 			*self
@@ -268,8 +270,21 @@ impl Queue {
 				.get_mut(&job.allocation.as_ref().unwrap()[res_type])
 				.unwrap() -= *req;
 		}
-		job.spawn(unparker).unwrap();
+		job.spawn(Some((sender, self.name.clone()))).unwrap();
 		self.running_jobs.insert(job.id.to_string(), job);
+	}
+
+	fn try_schedule(&mut self, sender: Sender<Message>) {
+		if !self.future_jobs.is_empty() {
+			if let Some(allocation) = self.check_availability(&self.future_jobs[0]) {
+				let mut job = self.future_jobs.pop_front().unwrap();
+				job.allocation = Some(allocation);
+				self.run(job, sender);
+			} else {
+				eprintln!("job still pending");
+				// error!(log, "job still pending");
+			}
+		}
 	}
 }
 
@@ -296,22 +311,22 @@ impl State {
 pub struct AppState {
 	log: slog::Logger,
 	state: Arc<RwLock<State>>,
-	unparker: Unparker,
 	is_exit: Arc<AtomicCell<bool>>,
+	sender: Sender<Message>,
 }
 impl AppState {
 	pub fn new(
 		log: slog::Logger,
 		state: Arc<RwLock<State>>,
-		unparker: Unparker,
 		is_exit: Arc<AtomicCell<bool>>,
+		sender: Sender<Message>,
 	) -> AppState {
 		info!(log, "--- AppState is created ---");
 		AppState {
-			log: log,
-			state: state,
-			unparker: unparker,
-			is_exit: is_exit,
+			log,
+			state,
+			is_exit,
+			sender,
 		}
 	}
 }
@@ -341,7 +356,6 @@ fn create_queue(
 						Ok(HttpResponse::from("q already exists"))
 					} else {
 						state.queues.insert(q.name.clone(), q);
-						r.state().unparker.unpark();
 						Ok(HttpResponse::from("created"))
 					}
 				}
@@ -368,7 +382,6 @@ fn delete_queue(
 				let mut state = state.write().unwrap();
 				if state.queues.contains_key(name) {
 					info!(log, "delete_queue - removed queue");
-					r.state().unparker.unpark();
 					state.queues.remove(name);
 					Ok(HttpResponse::from("deleted"))
 				} else {
@@ -383,6 +396,7 @@ fn delete_queue(
 }
 fn enqueue(r: HttpRequest<AppState>) -> impl Future<Item = HttpResponse, Error = actix_web::Error> {
 	let state = r.state().state.clone();
+	let sender = r.state().sender.clone();
 	r.payload()
 		.concat2()
 		.from_err::<actix_web::Error>()
@@ -395,7 +409,7 @@ fn enqueue(r: HttpRequest<AppState>) -> impl Future<Item = HttpResponse, Error =
 
 					let job = Job::from_json(&value).unwrap();
 					q.future_jobs.push_back(job);
-					r.state().unparker.unpark();
+					sender.send(Message::TrySchedule(q.name.clone())).unwrap();
 					Ok(HttpResponse::from("enqueued"))
 				} else {
 					Ok(HttpResponse::from("the queue does not exist"))
@@ -448,29 +462,24 @@ fn exit(r: &HttpRequest<AppState>) -> impl Responder {
 	info!(r.state().log, "received STOP signal");
 	actix::System::current().stop();
 	r.state().is_exit.store(true);
-	r.state().unparker.unpark();
-	"bye"
+	"bye" // AppState drop -> sender drop -> channel disconnect
 }
 
 pub fn run(log: slog::Logger) {
 	let listener = UnixListener::bind("/tmp/grass.sock").expect("bind failed");
 	let sys = actix::System::new("unix-socket");
-	let parker = Parker::new();
-	let unparker = parker.unparker();
 	let state = Arc::new(RwLock::new(State::new()));
+
+	let (sender, receiver) = unbounded();
 
 	let is_exit = Arc::new(AtomicCell::new(false));
 
 	{
-		clone_all!(log, unparker, state, is_exit);
+		clone_all!(log, state, is_exit, sender);
 		#[allow(deprecated)]
 		actix_web::server::new(move || {
-			let app_state = AppState::new(
-				log.clone(),
-				state.clone(),
-				unparker.clone(),
-				is_exit.clone(),
-			);
+			let app_state =
+				AppState::new(log.clone(), state.clone(), is_exit.clone(), sender.clone());
 			actix_web::App::with_state(app_state)
 				.resource("/create-queue", |r| {
 					r.method(Method::PUT).with_async(create_queue)
@@ -492,7 +501,7 @@ pub fn run(log: slog::Logger) {
 	}
 
 	{
-		clone_all!(log, unparker);
+		clone_all!(log, receiver, sender);
 		thread::scope(move |scope| {
 			{
 				clone_all!(log);
@@ -500,24 +509,55 @@ pub fn run(log: slog::Logger) {
 					info!(log, "scheduler thread spawned");
 					while !is_exit.load() {
 						// check for available schedule
-						info!(log, "parking");
-						parker.park();
-						info!(log, "unparked");
+						info!(log, "waiting for msg ..");
 
+						let msg = receiver.recv();
 						let mut state = state.write().unwrap();
-						for (_name, queue) in state.queues.iter_mut() {
-							if !queue.future_jobs.is_empty() {
-								if let Some(allocation) =
-									queue.check_availability(&queue.future_jobs[0])
-								{
-									let mut job = queue.future_jobs.pop_front().unwrap();
-									job.allocation = Some(allocation);
-									queue.run(job, unparker.clone());
+						match msg {
+							Ok(Message::TrySchedule(q_name)) => {
+								info!(log, "msg: TrySchedule"; "q"=>&q_name);
+								// check validity of msg
+								if let Some(queue) = state.queues.get_mut(&q_name) {
+									queue.try_schedule(sender.clone());
 								} else {
-									error!(log, "job still pending");
+									continue;
 								}
 							}
-						}
+							Ok(Message::JobFinished(q_name, job_id)) => {
+								info!(log, "msg: JobFinished"; "q"=>&q_name, "job"=>&job_id);
+								// check validity of msg
+								// TODO: use queue_id
+								if let Some(queue) = state.queues.get_mut(&q_name) {
+									if let Some(mut job) = queue.running_jobs.remove(&job_id) {
+										job.status = JobStatus::Finished;
+										for (res_type, req) in &job.require {
+											*queue
+												.available
+												.get_mut(res_type)
+												.unwrap()
+												.capacities
+												.get_mut(
+													&job.allocation.as_ref().unwrap()[res_type],
+												)
+												.unwrap() += *req;
+										}
+										queue.past_jobs.push(job);
+										queue.try_schedule(sender.clone());
+									} else {
+										error!(
+											log,
+											"race condition; finished job is not in running_jobs"; "job_id"=>job_id
+										);
+									}
+								} else {
+									warn!(log, "job finished, but its queue has gone");
+								}
+							}
+							Err(e) => {
+								error!(log, "channel disconnected"; "err"=>%e);
+								break;
+							}
+						};
 					}
 				});
 			}

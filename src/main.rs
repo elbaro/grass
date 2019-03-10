@@ -149,7 +149,7 @@ fn main() {
 			};
 			info!(log, "show"; "payload" => %value);
 			let res = send_json("http://localhost/show", "post", &value);
-			info!(log, "response"; "msg"=>serde_json::to_string_pretty(&serde_json::from_str::<Value>(&res).unwrap()).unwrap());
+			info!(log, "response"; "msg"=>&serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).unwrap_or(res));
 		}
 		"daemon" => {
 			let log = get_logger(Some(
