@@ -129,9 +129,15 @@ fn main() {
 				json!({})
 			};
 
+			let cwd = if let Some(path) = matches.value_of("cwd") {
+				std::fs::canonicalize(path)
+			} else {
+				std::fs::canonicalize(std::env::current_dir().expect("cannot read current working direrctory"))
+			}.unwrap().to_str().expect("cwd is invalid utf-8").to_string();
+
 			let value = json!({
 				"queue": matches.value_of("name").unwrap().clone(),
-				"cwd": matches.value_of("cwd").unwrap_or("."),
+				"cwd": cwd,
 				"cmd": cmd,
 				"envs": envs,
 				"require": req,

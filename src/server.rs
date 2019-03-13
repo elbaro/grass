@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use tokio_uds::UnixListener;
+use std::process::Stdio;
 
 // we have a global channel for all queues
 pub enum Message {
@@ -188,6 +189,8 @@ impl Job {
 						.collect::<Vec<_>>(),
 				)
 				.current_dir(job.cwd)
+				.stdin(Stdio::null())
+				.stdout(Stdio::null())
 				.status();
 
 			if let Some((sender, q_name)) = track {
