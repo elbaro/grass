@@ -3,12 +3,15 @@
 #[macro_use]
 extern crate clap;
 
+use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 use serde_json::{json, Value};
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn, Drain};
 use std::io::Read;
+use std::process::Stdio;
 
 mod cli;
+mod objects;
 mod server;
 
 fn send_json(url: &str, method: &str, obj: &Value) -> String {
@@ -76,6 +79,9 @@ fn main() {
 			let self_path = std::env::args().next().unwrap();
 			std::process::Command::new(&self_path)
 				.arg("daemon")
+				.stdin(Stdio::null())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
 				.spawn()
 				.expect("Daemon process failed to start.");
 		}
@@ -132,8 +138,14 @@ fn main() {
 			let cwd = if let Some(path) = matches.value_of("cwd") {
 				std::fs::canonicalize(path)
 			} else {
-				std::fs::canonicalize(std::env::current_dir().expect("cannot read current working direrctory"))
-			}.unwrap().to_str().expect("cwd is invalid utf-8").to_string();
+				std::fs::canonicalize(
+					std::env::current_dir().expect("cannot read current working direrctory"),
+				)
+			}
+			.unwrap()
+			.to_str()
+			.expect("cwd is invalid utf-8")
+			.to_string();
 
 			let value = json!({
 				"queue": matches.value_of("name").unwrap().clone(),
@@ -155,7 +167,90 @@ fn main() {
 			};
 			info!(log, "show"; "payload" => %value);
 			let res = send_json("http://localhost/show", "post", &value);
-			info!(log, "response"; "msg"=>&serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).unwrap_or(res));
+
+			if matches.is_present("json") {
+				info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
+			} else {
+				// for each queue
+				if let Ok(val) = serde_json::from_str::<Value>(&res) {
+					if let Some(obj) = val.as_object() {
+						for (q_name, q_obj) in obj {
+							println!();
+							let mut t = term::stdout().unwrap();
+							t.fg(term::color::WHITE).unwrap();
+							t.attr(term::Attr::Bold).unwrap();
+
+							writeln!(t, "[Queue: {}]", q_name).unwrap();
+
+							t.reset().unwrap();
+							let mut table = Table::new();
+							table.add_row(row![
+								"job_id",
+								"status",
+								"command",
+								"allocation",
+								"result"
+							]);
+
+							for (job_status, q_iter) in &mut [
+								(
+									Cell::new("Pending"),
+									&mut (&q_obj["future_jobs"]).as_array().unwrap().iter()
+										as (&mut dyn std::iter::Iterator<Item = &Value>),
+								),
+								(
+									Cell::new("Running")
+										.with_style(Attr::ForegroundColor(color::YELLOW)),
+									&mut (&q_obj["running_jobs"]).as_object().unwrap().values()
+										as (&mut dyn std::iter::Iterator<Item = &Value>),
+								),
+								(
+									Cell::new("Finished")
+										.with_style(Attr::ForegroundColor(color::GREEN)),
+									&mut (&q_obj["past_jobs"]).as_array().unwrap().iter()
+										as (&mut dyn std::iter::Iterator<Item = &Value>),
+								),
+							] {
+								for job_obj in q_iter {
+									let job = job_obj.as_object().unwrap();
+									let cmd: String = job["cmd"]
+										.as_array()
+										.unwrap()
+										.iter()
+										.map(|x| x.as_str().unwrap().to_string())
+										.collect::<Vec<String>>()
+										.join(" ");
+									table.add_row(Row::new(vec![
+										Cell::new(job["id"].as_str().unwrap()),
+										job_status.clone(),
+										Cell::new(&cmd),
+										Cell::new(
+											serde_json::to_string(&job["allocation"])
+												.as_ref()
+												.map(String::as_str)
+												.unwrap_or(""),
+										),
+										Cell::new(
+											job.get("result")
+												.and_then(|x| serde_json::to_string(x).ok())
+												.as_ref()
+												.map(String::as_str)
+												.unwrap_or("?"),
+										),
+									]));
+								}
+							}
+
+							if table.len() == 0 {
+								println!("no jobs");
+							}
+							table.printstd();
+						}
+					}
+
+					// job_id | status | command | allocation
+				}
+			}
 		}
 		"daemon" => {
 			let log = get_logger(Some(
@@ -175,6 +270,7 @@ fn main() {
 			lock.release().expect("fail to release lock");
 			info!(log, "Quit.");
 		}
+		"dashboard" => unimplemented!(),
 		_ => unreachable!(),
 	};
 }

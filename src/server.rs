@@ -5,172 +5,82 @@ use crossbeam::{
 	channel::{unbounded, Sender},
 	thread,
 };
-use decimal::d128;
 use futures::future::Future;
 use futures::stream::Stream;
-use serde::Serialize;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slog::{error, info, warn};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use tokio_uds::UnixListener;
-use std::process::Stdio;
+
+use crate::objects::{JobStatus, ResourceTypeCapacity};
 
 // we have a global channel for all queues
 pub enum Message {
-	TrySchedule(String),         // queue name
-	JobFinished(String, String), // queue name, job id
+	TrySchedule(String), // queue name
+	JobFinished(JobFinishedPayload),
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct Resource {
-	name: String,
-	capacities: HashMap<String, d128>,
+pub struct JobFinishedPayload {
+	q_name: String,
+	job_id: String,
+	status: Result<(), String>,
+	duration: i32,
 }
 
-impl Resource {
-	// fn to_json(&self) -> Value {
-	// 	let mut cap = serde_json::map::Map::new();
-	// 	for (k, v) in &self.capacities {
-	// 		cap[k] = v.to_string().into();
-	// 	}
-	// 	json!({
-	// 		"name" : self.name.clone(),
-	// 		"capacities" : cap,
-	// 	})
-	// }
-
-	/// name: 'gpu'
-	/// value: num, [], {}
-
-	/// There are 3 types of resource specification in json.
-	/// int 4 === [1,1,1,1]
-	/// list [64,64,32] === {"0":64,"1":64,"2":32}
-	/// dict {"HDD0":128,"HDD2":64,"HDD5":32}
-	fn from_json(name: &str, value: &Value) -> Result<Resource, Box<std::error::Error>> {
-		let mut v = Vec::<(String, d128)>::new();
-
-		use std::iter::Iterator;
-
-		match value {
-			Value::Number(n) => {
-				if let Some(n) = n.as_u64() {
-					for i in 0..n {
-						v.push((i.to_string(), d128!(1)));
-					}
-				} else {
-					Err("It should be a single integer")?;
-				}
-			}
-			Value::Array(arr) => {
-				// check if all items are numbers
-				if !arr.iter().all(|x| x.is_number()) {
-					Err("List has a non-number")?;
-				}
-
-				for (i, item) in arr.iter().enumerate() {
-					v.push((i.to_string(), d128::from_str(&item.to_string()).unwrap()));
-				}
-			}
-			Value::Object(obj) => {
-				for (k, value) in obj.iter() {
-					if !value.is_number() {
-						Err("dict value is not a number")?
-					}
-					v.push((k.to_string(), d128::from_str(&value.to_string()).unwrap()));
-				}
-			}
-			_ => {
-				Err("Unsupported resource capacity. It should be int, list, or dictionary")?;
-			}
-		}
-
-		Ok(Resource {
-			name: name.to_string(),
-			capacities: v.iter().cloned().collect(),
-		})
-	}
-}
-
-#[derive(Clone, Serialize)]
-pub enum JobStatus {
-	Created,
-	// Pending,
-	Running,
-	// Completed,
-	// Failed,
-	Finished,
-}
-
+/// Job has information about running context.
+/// Job consumes resources from a queue, and returns back when finished.
+///
 #[derive(Clone, Serialize)]
 pub struct Job {
 	id: String,
 	cwd: PathBuf,
 	cmd: Vec<String>,
 	envs: Vec<(String, String)>,
-	require: HashMap<String, d128>,
+	require: HashMap<String, Decimal>,
 	status: JobStatus,
 	allocation: Option<HashMap<String, String>>,
 }
 
-impl Job {
-	/// {
-	/// 	"name": "queue",
-	/// 	"resources": {
-	/// 		"gpu": 8,
-	/// 	}
-	/// }
-	fn from_json(value: &Value) -> Result<Job, Box<std::error::Error>> {
+#[derive(Serialize, Deserialize)]
+struct JobSpecification {
+	cwd: PathBuf,
+	cmd: Vec<String>,
+	envs: Vec<(String, String)>,
+	require: HashMap<String, Decimal>,
+}
+
+impl JobSpecification {
+	fn build(self) -> Job {
 		let id = uuid::Uuid::new_v4().to_hyphenated().to_string();
-
-		let cwd = if let Some(c) = value.get("cwd") {
-			PathBuf::from(c.as_str().expect("cwd is not string"))
-		} else {
-			std::fs::canonicalize(
-				std::env::current_dir().expect("cannot read current working direrctory"),
-			)
-			.unwrap()
-		};
-
-		let cmd = if let Value::Array(vec) = &value["cmd"] {
-			vec.iter()
-				.map(|x| x.as_str().map(|s| s.to_string()))
-				.collect::<Option<Vec<String>>>()
-				.ok_or("non-string in cmd")?
-		} else {
-			Err("cmd should be a list")?
-		};
-
-		let require: HashMap<String, d128> = if let Value::Object(obj) = &value["require"] {
-			obj.iter()
-				.map(|(k, v)| (k.to_string(), d128::from_str(&v.to_string()).unwrap()))
-				.collect()
-		} else {
-			Err("require field is not obj")?
-		};
-
-		Ok(Job {
+		Job {
 			id,
-			cwd,
-			cmd,
-			envs: Vec::new(),
-			require,
+			cwd: self.cwd,
+			cmd: self.cmd,
+			envs: self.envs,
+			require: self.require,
 			status: JobStatus::Created,
 			allocation: None,
-		})
+		}
 	}
+}
+
+impl Job {
+	/// requires: cwd, cmd
 	fn spawn(
 		&mut self,
 		track: Option<(Sender<Message>, String)>,
 	) -> Result<(), Box<std::error::Error>> {
-		self.status = JobStatus::Running;
+		self.status = JobStatus::Running { pid: 0 };
 		let job: Job = self.clone();
 		std::thread::spawn(move || -> Result<(), Box<std::error::Error + Send>> {
 			let allocation = job.allocation.as_ref().unwrap();
-			let _status = std::process::Command::new(&job.cmd[0])
+			let status = std::process::Command::new(&job.cmd[0])
 				.args(
 					job.cmd[1..]
 						.iter()
@@ -191,10 +101,28 @@ impl Job {
 				.current_dir(job.cwd)
 				.stdin(Stdio::null())
 				.stdout(Stdio::null())
+				.stderr(Stdio::null())
 				.status();
 
 			if let Some((sender, q_name)) = track {
-				let _ = sender.send(Message::JobFinished(q_name, job.id));
+				let status = match status {
+					Ok(status) => {
+						if status.success() {
+							Ok(())
+						} else if let Some(code) = status.code() {
+							Err(format!("exit code {}", code))
+						} else {
+							Err("exit by some signal".to_string())
+						}
+					}
+					Err(err) => Err(format!("spawn error: {}", err)),
+				};
+				let _ = sender.send(Message::JobFinished(JobFinishedPayload {
+					q_name,
+					job_id: job.id,
+					status,
+					duration: 0,
+				}));
 			}
 			Ok(())
 		});
@@ -207,42 +135,41 @@ impl Job {
 pub struct Queue {
 	name: String,
 	id: String,
-	resources: HashMap<String, Resource>,
-	available: HashMap<String, Resource>,
+	resources: HashMap<String, ResourceTypeCapacity>,
+	available: HashMap<String, ResourceTypeCapacity>,
 	future_jobs: VecDeque<Job>,
 	running_jobs: HashMap<String, Job>,
 	past_jobs: Vec<Job>,
 }
-impl Queue {
-	fn from_json(value: &Value) -> Result<Queue, Box<std::error::Error>> {
+
+#[derive(Serialize, Deserialize)]
+struct QueueSpecification {
+	name: String,
+	resources: HashMap<String, ResourceTypeCapacity>,
+}
+
+impl QueueSpecification {
+	fn build(self) -> Queue {
 		let id = uuid::Uuid::new_v4().to_hyphenated().to_string();
-		let name = value["name"].as_str().ok_or("no name")?.to_string();
-		if let Value::Object(obj) = &value["resources"] {
-			let resources: HashMap<String, Resource> = obj
-				.iter()
-				.map(|(k, v)| (k.to_string(), Resource::from_json(k, v).unwrap()))
-				.collect();
-			let available = resources.clone();
-			return Ok(Queue {
-				id,
-				name,
-				resources,
-				available,
-				future_jobs: VecDeque::new(),
-				running_jobs: HashMap::new(),
-				past_jobs: Vec::new(),
-			});
-		} else {
-			Err("no resources")?
+		Queue {
+			id,
+			name: self.name,
+			resources: self.resources.clone(),
+			available: self.resources,
+			future_jobs: VecDeque::new(),
+			running_jobs: HashMap::new(),
+			past_jobs: Vec::new(),
 		}
 	}
+}
 
+impl Queue {
 	fn check_availability(&self, job: &Job) -> Option<HashMap<String, String>> {
 		let mut allocation = HashMap::<String, String>::new();
 		let chk = job.require.iter().all(|(res_type, amount)| {
 			if self.available.contains_key(res_type) {
 				// hdd1, hdd2, ..
-				for (res_instance, res_capacity) in &self.available[res_type].capacities {
+				for (res_instance, res_capacity) in &self.available[res_type].0 {
 					if res_capacity >= amount {
 						allocation.insert(res_type.to_string(), res_instance.to_string()); // HDD: HDD1
 						return true;
@@ -269,7 +196,7 @@ impl Queue {
 				.available
 				.get_mut(res_type)
 				.unwrap()
-				.capacities
+				.0
 				.get_mut(&job.allocation.as_ref().unwrap()[res_type])
 				.unwrap() -= *req;
 		}
@@ -301,13 +228,6 @@ impl State {
 			queues: HashMap::new(),
 		}
 	}
-	// fn to_json(&self) -> Value {
-	// 	let mut arr = Vec::<Value>::new();
-	// 	for (_, q) in &self.queues {
-	// 		arr.push(q.to_json());
-	// 	}
-	// 	Value::Array(arr)
-	// }
 }
 
 #[derive(Clone)]
@@ -350,7 +270,8 @@ fn create_queue(
 		.from_err::<actix_web::Error>()
 		.and_then(move |body| {
 			let q: Result<Queue, Box<std::error::Error>> = try {
-				Queue::from_json(&serde_json::from_str::<Value>(std::str::from_utf8(&body)?)?)?
+				let s = std::str::from_utf8(&body)?;
+				serde_json::from_str::<QueueSpecification>(s)?.build()
 			};
 			match q {
 				Ok(q) => {
@@ -409,8 +330,9 @@ fn enqueue(r: HttpRequest<AppState>) -> impl Future<Item = HttpResponse, Error =
 				let mut state = state.write().unwrap();
 				if state.queues.contains_key(queue) {
 					let q = state.queues.get_mut(queue).unwrap();
-
-					let job = Job::from_json(&value).unwrap();
+					let job = serde_json::from_value::<JobSpecification>(value.clone())
+						.unwrap()
+						.build();
 					q.future_jobs.push_back(job);
 					sender.send(Message::TrySchedule(q.name.clone())).unwrap();
 					Ok(HttpResponse::from("enqueued"))
@@ -526,19 +448,22 @@ pub fn run(log: slog::Logger) {
 									continue;
 								}
 							}
-							Ok(Message::JobFinished(q_name, job_id)) => {
-								info!(log, "msg: JobFinished"; "q"=>&q_name, "job"=>&job_id);
+							Ok(Message::JobFinished(msg)) => {
+								info!(log, "msg: JobFinished"; "q"=>&msg.q_name, "job"=>&msg.job_id);
 								// check validity of msg
 								// TODO: use queue_id
-								if let Some(queue) = state.queues.get_mut(&q_name) {
-									if let Some(mut job) = queue.running_jobs.remove(&job_id) {
-										job.status = JobStatus::Finished;
+								if let Some(queue) = state.queues.get_mut(&msg.q_name) {
+									if let Some(mut job) = queue.running_jobs.remove(&msg.job_id) {
+										job.status = JobStatus::Finished {
+											exit_status: msg.status,
+											duration: 0,
+										};
 										for (res_type, req) in &job.require {
 											*queue
 												.available
 												.get_mut(res_type)
 												.unwrap()
-												.capacities
+												.0
 												.get_mut(
 													&job.allocation.as_ref().unwrap()[res_type],
 												)
@@ -549,7 +474,7 @@ pub fn run(log: slog::Logger) {
 									} else {
 										error!(
 											log,
-											"race condition; finished job is not in running_jobs"; "job_id"=>job_id
+											"race condition; finished job is not in running_jobs"; "job_id"=>msg.job_id
 										);
 									}
 								} else {
@@ -574,14 +499,12 @@ pub fn run(log: slog::Logger) {
 
 #[cfg(test)]
 mod tests {
-	use super::Queue;
-	use decimal::d128;
+	use super::QueueSpecification;
 
 	#[test]
 	fn test_queue() {
-		let q = Queue::from_json(
-			&serde_json::from_str::<serde_json::value::Value>(
-				r#"
+		let q = &serde_json::from_str::<QueueSpecification>(
+			r#"
 			{
 				"name": "qs",
 				"resources": {
@@ -594,19 +517,18 @@ mod tests {
 				}
 			}
 		"#,
-			)
-			.unwrap(),
 		)
-		.unwrap();
+		.unwrap()
+		.build();
 
 		assert_eq!(q.name, "qs");
 		assert_eq!(
-			q.resources.get("gpu").unwrap().capacities,
+			q.resources.get("gpu").unwrap().0,
 			[
-				("0".to_string(), d128::from(1)),
-				("1".to_string(), d128::from(1)),
-				("2".to_string(), d128::from(1)),
-				("3".to_string(), d128::from(1))
+				("0".to_string(), 1.into()),
+				("1".to_string(), 1.into()),
+				("2".to_string(), 1.into()),
+				("3".to_string(), 1.into())
 			]
 			.iter()
 			.cloned()
@@ -614,11 +536,11 @@ mod tests {
 		);
 
 		assert_eq!(
-			q.resources.get("hdd").unwrap().capacities,
+			q.resources.get("hdd").unwrap().0,
 			[
-				("0".to_string(), d128::from(64)),
-				("1".to_string(), d128::from(32)),
-				("2".to_string(), d128::from(128)),
+				("0".to_string(), 64.into()),
+				("1".to_string(), 32.into()),
+				("2".to_string(), 128.into()),
 			]
 			.iter()
 			.cloned()
@@ -626,10 +548,10 @@ mod tests {
 		);
 
 		assert_eq!(
-			q.resources.get("cpu").unwrap().capacities,
+			q.resources.get("cpu").unwrap().0,
 			[
-				("xeon1".to_string(), d128::from(16)),
-				("xeon2".to_string(), d128::from(8)),
+				("xeon1".to_string(), 16.into()),
+				("xeon2".to_string(), 8.into()),
 			]
 			.iter()
 			.cloned()
