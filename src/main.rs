@@ -7,12 +7,16 @@ use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 use serde_json::{json, Value};
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn, Drain};
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::Stdio;
 
 mod cli;
 mod objects;
 mod server;
+use objects::JobStatus;
+use server::Job;
+use server::Queue;
 
 fn send_json(url: &str, method: &str, obj: &Value) -> String {
 	let payload = obj.to_string();
@@ -169,83 +173,84 @@ fn main() {
 			let res = send_json("http://localhost/show", "post", &value);
 
 			if matches.is_present("json") {
+				// string -> json::Value -> pretty string
 				info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
 			} else {
 				// for each queue
 				if let Ok(val) = serde_json::from_str::<Value>(&res) {
-					if let Some(obj) = val.as_object() {
-						for (q_name, q_obj) in obj {
-							println!();
-							let mut t = term::stdout().unwrap();
-							t.fg(term::color::WHITE).unwrap();
-							t.attr(term::Attr::Bold).unwrap();
+					let queues: HashMap<String, Queue> = serde_json::from_str(&res).unwrap();
+					for (q_name, q) in &queues {
+						println!();
+						let mut t = term::stdout().unwrap();
+						t.fg(term::color::WHITE).unwrap();
+						t.attr(term::Attr::Bold).unwrap();
 
-							writeln!(t, "[Queue: {}]", q_name).unwrap();
+						writeln!(t, "[Queue: {}]", q_name).unwrap();
 
-							t.reset().unwrap();
-							let mut table = Table::new();
-							table.add_row(row![
-								"job_id",
-								"status",
-								"command",
-								"allocation",
-								"result"
-							]);
+						t.reset().unwrap();
+						let mut table = Table::new();
+						table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
 
-							for (job_status, q_iter) in &mut [
-								(
-									Cell::new("Pending"),
-									&mut (&q_obj["future_jobs"]).as_array().unwrap().iter()
-										as (&mut dyn std::iter::Iterator<Item = &Value>),
-								),
-								(
-									Cell::new("Running")
-										.with_style(Attr::ForegroundColor(color::YELLOW)),
-									&mut (&q_obj["running_jobs"]).as_object().unwrap().values()
-										as (&mut dyn std::iter::Iterator<Item = &Value>),
-								),
-								(
-									Cell::new("Finished")
-										.with_style(Attr::ForegroundColor(color::GREEN)),
-									&mut (&q_obj["past_jobs"]).as_array().unwrap().iter()
-										as (&mut dyn std::iter::Iterator<Item = &Value>),
-								),
-							] {
-								for job_obj in q_iter {
-									let job = job_obj.as_object().unwrap();
-									let cmd: String = job["cmd"]
-										.as_array()
-										.unwrap()
-										.iter()
-										.map(|x| x.as_str().unwrap().to_string())
-										.collect::<Vec<String>>()
-										.join(" ");
-									table.add_row(Row::new(vec![
-										Cell::new(job["id"].as_str().unwrap()),
-										job_status.clone(),
-										Cell::new(&cmd),
-										Cell::new(
-											serde_json::to_string(&job["allocation"])
-												.as_ref()
-												.map(String::as_str)
-												.unwrap_or(""),
-										),
-										Cell::new(
-											job.get("result")
-												.and_then(|x| serde_json::to_string(x).ok())
-												.as_ref()
-												.map(String::as_str)
-												.unwrap_or("?"),
-										),
-									]));
-								}
+						for q_iter in &mut [
+							&mut q.future_jobs.iter()
+								as (&mut dyn std::iter::Iterator<Item = &Job>),
+							&mut q.running_jobs.values()
+								as (&mut dyn std::iter::Iterator<Item = &Job>),
+							&mut q.past_jobs.iter() as (&mut dyn std::iter::Iterator<Item = &Job>),
+						] {
+							for job in q_iter {
+								let cmd: String = job.cmd.join(" ");
+
+								let (status_cell, result) = match &job.status {
+									JobStatus::Created => (Cell::new("Pending"), "".to_string()),
+									JobStatus::Running { pid } => (
+										Cell::new("Running")
+											.with_style(Attr::ForegroundColor(color::YELLOW)),
+										format!("pid: {}", pid),
+									),
+									JobStatus::Finished {
+										exit_status: Ok(()),
+										..
+									} => (
+										Cell::new("Success")
+											.with_style(Attr::ForegroundColor(color::GREEN)),
+										"-".to_string(),
+									),
+									JobStatus::Finished {
+										exit_status: Err(err),
+										..
+									} => (
+										Cell::new("Failed")
+											.with_style(Attr::ForegroundColor(color::RED)),
+										err.to_string(),
+									),
+								};
+
+								let allocation = job
+									.allocation
+									.as_ref()
+									.map(|x| serde_json::to_string(&x).unwrap())
+									.unwrap_or("".to_string());
+
+								// wrap cmd and result
+								let cmd = textwrap::fill(&cmd, 30);
+								let result = textwrap::fill(&result, 20);
+								let allocation = textwrap::fill(&allocation, 20);
+
+								table.add_row(Row::new(vec![
+									Cell::new(&job.id[..8]),
+									status_cell,
+									Cell::new(&cmd),
+									Cell::new(&allocation),
+									Cell::new(&result),
+								]));
 							}
-
-							if table.len() == 0 {
-								println!("no jobs");
-							}
-							table.printstd();
 						}
+
+						if table.len() == 0 {
+							println!("no jobs");
+						}
+						table.printstd();
 					}
 
 					// job_id | status | command | allocation

@@ -32,6 +32,17 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 					Err(de::Error::custom("It should be a single integer"))
 				}
 			}
+			Value::String(s) => {
+				if let Ok(n) = &s.parse::<u32>() {
+					let mut m = HashMap::new();
+					for i in 0..*n {
+						m.insert(i.to_string(), 1.into());
+					}
+					Ok(ResourceTypeCapacity(m))
+				} else {
+					Err(de::Error::custom("It should be a single integer"))
+				}
+			}
 			Value::Array(arr) => {
 				let mut m = HashMap::new();
 				// check if all items are numbers
@@ -47,13 +58,22 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 			Value::Object(obj) => {
 				let mut m = HashMap::new();
 				for (k, value) in obj.iter() {
-					if !value.is_number() {
-						return Err(de::Error::custom("map value is not a number"));
-					}
-					m.insert(
-						k.to_string(),
-						Decimal::from_str(&value.to_string()).unwrap(),
-					);
+					let v: Decimal = if let Some(num) = value.as_f64() {
+						num::FromPrimitive::from_f64(num).unwrap()
+					} else if let Some(s) = value.as_str() {
+						Decimal::from_str(s).map_err(|_| {
+							de::Error::custom(format!(
+								"Map value is not a number: {}",
+								&value.to_string()
+							))
+						})?
+					} else {
+						Err(de::Error::custom(format!(
+							"Map value is not a number: {}",
+							&value.to_string()
+						)))?
+					};
+					m.insert(k.to_string(), v);
 				}
 				Ok(ResourceTypeCapacity(m))
 			}
@@ -69,7 +89,7 @@ pub enum JobStatus {
 	Created,
 	// Pending,
 	Running {
-		pid: i32,
+		pid: u32,
 	},
 	// Completed,
 	// Failed,

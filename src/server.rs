@@ -14,6 +14,7 @@ use slog::{error, info, warn};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use tokio_uds::UnixListener;
@@ -23,7 +24,14 @@ use crate::objects::{JobStatus, ResourceTypeCapacity};
 // we have a global channel for all queues
 pub enum Message {
 	TrySchedule(String), // queue name
+	JobRunning(JobRunningPayload),
 	JobFinished(JobFinishedPayload),
+}
+
+pub struct JobRunningPayload {
+	q_name: String,
+	job_id: String,
+	pid: u32,
 }
 
 pub struct JobFinishedPayload {
@@ -36,15 +44,15 @@ pub struct JobFinishedPayload {
 /// Job has information about running context.
 /// Job consumes resources from a queue, and returns back when finished.
 ///
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Job {
-	id: String,
-	cwd: PathBuf,
-	cmd: Vec<String>,
-	envs: Vec<(String, String)>,
+	pub id: String,
+	pub cwd: PathBuf,
+	pub cmd: Vec<String>,
+	pub envs: Vec<(String, String)>,
 	require: HashMap<String, Decimal>,
-	status: JobStatus,
-	allocation: Option<HashMap<String, String>>,
+	pub status: JobStatus,
+	pub allocation: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,50 +88,65 @@ impl Job {
 		let job: Job = self.clone();
 		std::thread::spawn(move || -> Result<(), Box<std::error::Error + Send>> {
 			let allocation = job.allocation.as_ref().unwrap();
-			let status = std::process::Command::new(&job.cmd[0])
-				.args(
-					job.cmd[1..]
-						.iter()
-						.map(|x| strfmt::strfmt(x, allocation).unwrap())
-						.collect::<Vec<String>>(),
-				)
-				.envs(
-					job.envs
-						.iter()
-						.map(|(k, v)| {
-							(
-								strfmt::strfmt(k, allocation).unwrap(),
-								strfmt::strfmt(v, allocation).unwrap(),
-							)
-						})
-						.collect::<Vec<_>>(),
-				)
-				.current_dir(job.cwd)
-				.stdin(Stdio::null())
-				.stdout(Stdio::null())
-				.stderr(Stdio::null())
-				.status();
+			let (sender, q_name) = track.unwrap();
+			let status: Result<ExitStatus, String> = try {
+				let mut child = std::process::Command::new(&job.cmd[0])
+					.args(
+						job.cmd[1..]
+							.iter()
+							.map(|x| strfmt::strfmt(x, allocation).unwrap())
+							.collect::<Vec<String>>(),
+					)
+					.envs(
+						job.envs
+							.iter()
+							.map(|(k, v)| {
+								(
+									strfmt::strfmt(k, allocation).unwrap(),
+									strfmt::strfmt(v, allocation).unwrap(),
+								)
+							})
+							.collect::<Vec<_>>(),
+					)
+					.current_dir(job.cwd)
+					.stdin(Stdio::null())
+					.stdout(Stdio::null())
+					.stderr(Stdio::null())
+					.spawn()
+					.map_err(|err| format!("spawn error: {}", err))?;
 
-			if let Some((sender, q_name)) = track {
-				let status = match status {
-					Ok(status) => {
-						if status.success() {
-							Ok(())
-						} else if let Some(code) = status.code() {
-							Err(format!("exit code {}", code))
-						} else {
-							Err("exit by some signal".to_string())
-						}
-					}
-					Err(err) => Err(format!("spawn error: {}", err)),
-				};
-				let _ = sender.send(Message::JobFinished(JobFinishedPayload {
-					q_name,
-					job_id: job.id,
-					status,
-					duration: 0,
+				let _ = sender.send(Message::JobRunning(JobRunningPayload {
+					q_name: q_name.clone(),
+					job_id: job.id.clone(),
+					pid: child.id(),
 				}));
-			}
+
+				let status = child
+					.wait()
+					.map_err(|err| format!("cannot wait child process: {}", err))?;
+
+				status
+			};
+
+			let status = match status {
+				Ok(status) => {
+					if status.success() {
+						Ok(())
+					} else if let Some(code) = status.code() {
+						Err(format!("exit code {}", code))
+					} else {
+						Err("exit by some signal".to_string())
+					}
+				}
+				Err(err) => Err(format!("spawn error: {}", err)),
+			};
+			let _ = sender.send(Message::JobFinished(JobFinishedPayload {
+				q_name,
+				job_id: job.id,
+				status,
+				duration: 0,
+			}));
+
 			Ok(())
 		});
 
@@ -131,15 +154,15 @@ impl Job {
 	}
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Queue {
 	name: String,
 	id: String,
 	resources: HashMap<String, ResourceTypeCapacity>,
 	available: HashMap<String, ResourceTypeCapacity>,
-	future_jobs: VecDeque<Job>,
-	running_jobs: HashMap<String, Job>,
-	past_jobs: Vec<Job>,
+	pub future_jobs: VecDeque<Job>,
+	pub running_jobs: HashMap<String, Job>,
+	pub past_jobs: Vec<Job>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -218,7 +241,7 @@ impl Queue {
 	}
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct State {
 	queues: HashMap<String, Queue>,
 }
@@ -446,6 +469,23 @@ pub fn run(log: slog::Logger) {
 									queue.try_schedule(sender.clone());
 								} else {
 									continue;
+								}
+							}
+							Ok(Message::JobRunning(msg)) => {
+								info!(log, "msg: JobRunning"; "q"=>&msg.q_name, "job"=>&msg.job_id);
+								// check validity of msg
+								// TODO: use queue_id
+								if let Some(queue) = state.queues.get_mut(&msg.q_name) {
+									if let Some(mut job) = queue.running_jobs.get_mut(&msg.job_id) {
+										job.status = JobStatus::Running { pid: msg.pid };
+									} else {
+										error!(
+											log,
+											"race condition; got pid information, but job is not running"; "job_id"=>msg.job_id
+										);
+									}
+								} else {
+									warn!(log, "job running, but its queue has gone");
 								}
 							}
 							Ok(Message::JobFinished(msg)) => {
