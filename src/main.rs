@@ -18,6 +18,39 @@ use objects::JobStatus;
 use server::Job;
 use server::Queue;
 
+use app_dirs::{get_app_root, AppInfo};
+const APP_INFO: AppInfo = AppInfo {
+	name: "grass",
+	author: "elbaro",
+};
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppConfig {
+	master: Option<std::net::SocketAddr>,
+}
+
+impl AppConfig {
+	fn default() -> AppConfig {
+		AppConfig { master: None }
+	}
+	fn load() -> Result<AppConfig, Box<dyn std::error::Error>> {
+		let path = get_app_root(app_dirs::AppDataType::UserConfig, &APP_INFO)?.join("grass.toml");
+		let string = match std::fs::read_to_string(&path) {
+			Ok(s) => s,
+			Err(e) => {
+				eprintln!("cannot read config file at {:#?}, err: {}", &path, e);
+				return Ok(AppConfig::default());
+			}
+		};
+		toml::from_str::<AppConfig>(&string).map_err(|e| e.into())
+	}
+	fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+		let path = get_app_root(app_dirs::AppDataType::UserConfig, &APP_INFO)?.join("grass.toml");
+		let s = toml::to_string_pretty(self)?;
+		std::fs::write(path, s)?;
+		Ok(())
+	}
+}
+
 fn send_json(url: &str, method: &str, obj: &Value) -> String {
 	let payload = obj.to_string();
 	let mut payload = payload.as_bytes();
@@ -74,20 +107,27 @@ fn get_logger(file: Option<std::fs::File>) -> slog::Logger {
 fn main() {
 	let args = cli::build_cli().get_matches();
 
+	let mut app_config = AppConfig::load();
+
 	let (sub, matches) = args.subcommand();
 	let matches = matches.unwrap();
 	match sub.as_ref() {
 		"start" => {
 			let log = get_logger(None);
 			info!(log, "Starting daemon .."; "pid" => "/tmp/grass.pid");
+
 			let self_path = std::env::args().next().unwrap();
-			std::process::Command::new(&self_path)
-				.arg("daemon")
+			let mut cmd = std::process::Command::new(&self_path);
+			cmd.arg("daemon")
 				.stdin(Stdio::null())
 				.stdout(Stdio::null())
-				.stderr(Stdio::null())
-				.spawn()
-				.expect("Daemon process failed to start.");
+				.stderr(Stdio::null());
+
+			if let Some(master) = matches.value_of("master") {
+				cmd.arg("--master").arg(master);
+			}
+
+			cmd.spawn().expect("Daemon process failed to start.");
 		}
 		"stop" => {
 			send_json("http://localhost/stop", "delete", &json!({}));
@@ -176,9 +216,8 @@ fn main() {
 				// string -> json::Value -> pretty string
 				info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
 			} else {
-				// for each queue
-				if let Ok(val) = serde_json::from_str::<Value>(&res) {
-					let queues: HashMap<String, Queue> = serde_json::from_str(&res).unwrap();
+				if let Ok(queues) = serde_json::from_str::<HashMap<String, Queue>>(&res) {
+					// for each queue
 					for (q_name, q) in &queues {
 						println!();
 						let mut t = term::stdout().unwrap();
