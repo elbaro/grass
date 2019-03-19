@@ -6,14 +6,16 @@ extern crate clap;
 use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 use serde_json::{json, Value};
 #[allow(unused_imports)]
-use slog::{error, info, o, trace, warn, Drain};
+use slog::{error, info, o, trace, warn};
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::Stdio;
 
 mod cli;
+mod logger;
 mod objects;
 mod server;
+
 use objects::JobStatus;
 use server::Job;
 use server::Queue;
@@ -86,35 +88,22 @@ fn send_json(url: &str, method: &str, obj: &Value) -> String {
 	return res;
 }
 
-fn get_logger(file: Option<std::fs::File>) -> slog::Logger {
-	let decorator = slog_term::TermDecorator::new().build();
-	let drain_term = slog_term::CompactFormat::new(decorator).build().fuse();
-
-	if let Some(file) = file {
-		let decorator = slog_term::PlainDecorator::new(file);
-		let drain_file = slog_term::CompactFormat::new(decorator).build().fuse();
-
-		let drain = slog::Duplicate(drain_term, drain_file).fuse();
-		let drain = slog_async::Async::new(drain).build().fuse();
-
-		slog::Logger::root(drain, o!())
-	} else {
-		let drain = slog_async::Async::new(drain_term).build().fuse();
-		slog::Logger::root(drain, o!())
-	}
-}
-
 fn main() {
 	let args = cli::build_cli().get_matches();
-
 	let mut app_config = AppConfig::load();
 
 	let (sub, matches) = args.subcommand();
 	let matches = matches.unwrap();
+
+	let log = if sub == "daemon" {
+		logger::init_logger(Some("/tmp/grass.log"))
+	} else {
+		logger::init_logger(None)
+	};
+
 	match sub.as_ref() {
 		"start" => {
-			let log = get_logger(None);
-			info!(log, "Starting daemon .."; "pid" => "/tmp/grass.pid");
+			info!(log, "Starting daemon in background."; "pid" => "/tmp/grass.pid");
 
 			let self_path = std::env::args().next().unwrap();
 			let mut cmd = std::process::Command::new(&self_path);
@@ -130,11 +119,12 @@ fn main() {
 			cmd.spawn().expect("Daemon process failed to start.");
 		}
 		"stop" => {
+			info!(log, "Stopping daemon in background."; "pid" => "/tmp/grass.pid");
 			send_json("http://localhost/stop", "delete", &json!({}));
 		}
 		"create-queue" => 'c: {
-			let log = get_logger(None);
 			let name = matches.value_of("name").unwrap().clone();
+			info!(log, "Request daemon to create a queue"; "name" => &name);
 
 			if let Some(_) = matches.value_of("file") {
 				unimplemented!();
@@ -151,16 +141,15 @@ fn main() {
 			send_json("http://localhost/create-queue", "put", &payload);
 		}
 		"delete-queue" => {
-			let log = get_logger(None);
 			let value = json!({
 				"name": matches.value_of("name").unwrap().clone(),
 				"confirmed": matches.is_present("confirmed"),
 			});
+			info!(log, "Request daemon to delete a queue"; "name" => &matches.value_of("name").unwrap());
 			let res = send_json("http://localhost/delete-queue", "delete", &value);
 			info!(log, "response"; "msg"=>%res);
 		}
 		"enqueue" => 'e: {
-			let log = get_logger(None);
 			// grass enqueue --queue q --cwd . --gpu 1 --cpu 0.5 -- python train.py ..
 			let cmd: Vec<&str> = matches.values_of("cmd").unwrap().collect();
 			let envs: Vec<&str> = matches
@@ -203,7 +192,6 @@ fn main() {
 			info!(log, "response"; "msg"=>res);
 		}
 		"show" => {
-			let log = get_logger(None);
 			let value = if let Some(q) = matches.value_of("queue") {
 				json!({ "queue": q })
 			} else {
@@ -297,9 +285,6 @@ fn main() {
 			}
 		}
 		"daemon" => {
-			let log = get_logger(Some(
-				std::fs::File::create("/tmp/grass.log").expect("cannot open /tmp/grass.log"),
-			));
 			info!(log, "This is a daemon process.");
 			let mut lock = pidlock::Pidlock::new("/tmp/grass.pid");
 			if let Err(e) = lock.acquire() {
