@@ -92,4 +92,6 @@ pub fn build_cli() -> App<'static, 'static> {
 				),
 		)
 		.subcommand(SubCommand::with_name("dashboard").arg(Arg::with_name("bind").long("bind").takes_value(true)))
+		.subcommand(SubCommand::with_name("broker"))
+		.subcommand(SubCommand::with_name("worker"))
 }

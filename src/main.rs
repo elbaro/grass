@@ -16,6 +16,10 @@ mod logger;
 mod objects;
 mod server;
 
+mod rpc;
+mod broker;
+mod worker;
+
 use objects::JobStatus;
 use server::Job;
 use server::Queue;
@@ -300,6 +304,12 @@ fn main() {
 			info!(log, "Quit.");
 		}
 		"dashboard" => unimplemented!(),
+		"broker" => {
+			broker::run();
+		}
+		"worker" => {
+			worker::run();
+		}
 		_ => unreachable!(),
 	};
 }

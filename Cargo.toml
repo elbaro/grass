@@ -35,3 +35,4 @@ self_update = "0.5.1"
 app_dirs = "1.2.1"
 toml = "0.5.0"
 once_cell = "0.1.8"
+essrpc = {version="0.2.0", path="essrpc/essrpc", features=["bincode_transport", "async_client"]}
