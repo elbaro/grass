@@ -1,28 +1,27 @@
+#![feature(await_macro, async_await, futures_api)]
 #![feature(try_blocks)]
 #![feature(label_break_value)]
 #[macro_use]
 extern crate clap;
 
 use prettytable::{cell, color, row, Attr, Cell, Row, Table};
-use serde_json::{json, Value};
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn};
-use std::collections::HashMap;
-use std::io::Read;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 mod cli;
 mod logger;
 mod objects;
-mod server;
 
-mod rpc;
 mod broker;
+mod daemon;
+mod rpc;
 mod worker;
 
-use objects::JobStatus;
-use server::Job;
-use server::Queue;
+use crate::rpc::Broker;
+use crate::rpc::Daemon;
+use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
 
 use app_dirs::{get_app_root, AppInfo};
 const APP_INFO: AppInfo = AppInfo {
@@ -57,41 +56,6 @@ impl AppConfig {
 	}
 }
 
-fn send_json(url: &str, method: &str, obj: &Value) -> String {
-	let payload = obj.to_string();
-	let mut payload = payload.as_bytes();
-	let mut easy = curl::easy::Easy::new();
-	easy.unix_socket("/tmp/grass.sock")
-		.expect("cannot connect to server");
-	easy.url(url).unwrap();
-	match method {
-		"put" => easy.put(true).unwrap(),
-		"get" => easy.get(true).unwrap(),
-		"delete" => easy.custom_request("DELETE").unwrap(),
-		"post" => easy.post(true).unwrap(),
-		_ => unimplemented!(),
-	}
-
-	easy.post_field_size(payload.len() as u64).unwrap();
-
-	let mut buf = Vec::new();
-	{
-		let mut transfer = easy.transfer();
-		transfer
-			.read_function(|buf| Ok(payload.read(buf).unwrap()))
-			.unwrap();
-		transfer
-			.write_function(|data| {
-				buf.extend_from_slice(data);
-				Ok(data.len())
-			})
-			.unwrap();
-		transfer.perform().unwrap();
-	}
-	let res = std::str::from_utf8(&buf[..]).unwrap().to_string();
-	return res;
-}
-
 fn main() {
 	let args = cli::build_cli().get_matches();
 	let mut app_config = AppConfig::load();
@@ -107,6 +71,11 @@ fn main() {
 
 	match sub.as_ref() {
 		"start" => {
+			// default === broker(bind:localhost), worker(connect:lcoalhost)
+			//             --no-broker  --bind
+			//                                       --no-worker --connect
+			//
+
 			info!(log, "Starting daemon in background."; "pid" => "/tmp/grass.pid");
 
 			let self_path = std::env::args().next().unwrap();
@@ -123,170 +92,149 @@ fn main() {
 			cmd.spawn().expect("Daemon process failed to start.");
 		}
 		"stop" => {
-			info!(log, "Stopping daemon in background."; "pid" => "/tmp/grass.pid");
-			send_json("http://localhost/stop", "delete", &json!({}));
-		}
-		"create-queue" => 'c: {
-			let name = matches.value_of("name").unwrap().clone();
-			info!(log, "Request daemon to create a queue"; "name" => &name);
-
-			if let Some(_) = matches.value_of("file") {
-				unimplemented!();
-			}
-			let j = matches.value_of("json").unwrap();
-			let resources = match json5::from_str::<Value>(j) {
-				Ok(val) => val,
-				Err(e) => {
-					error!(log, "fail to parse json"; "err"=>%e);
-					break 'c;
-				}
-			};
-			let payload = json!({"name": name, "resources": resources});
-			send_json("http://localhost/create-queue", "put", &payload);
-		}
-		"delete-queue" => {
-			let value = json!({
-				"name": matches.value_of("name").unwrap().clone(),
-				"confirmed": matches.is_present("confirmed"),
-			});
-			info!(log, "Request daemon to delete a queue"; "name" => &matches.value_of("name").unwrap());
-			let res = send_json("http://localhost/delete-queue", "delete", &value);
-			info!(log, "response"; "msg"=>%res);
+			info!(log, "Stopping daemon in background.");
+			daemon::new_daemon_client().unwrap().stop().unwrap();
 		}
 		"enqueue" => 'e: {
 			// grass enqueue --queue q --cwd . --gpu 1 --cpu 0.5 -- python train.py ..
-			let cmd: Vec<&str> = matches.values_of("cmd").unwrap().collect();
-			let envs: Vec<&str> = matches
+			let cmd: Vec<String> = matches
+				.values_of("cmd")
+				.unwrap()
+				.map(str::to_string)
+				.collect();
+			let envs: Vec<(String, String)> = matches
 				.values_of("env")
-				.map(|x| x.collect())
-				.unwrap_or(Vec::new());
-			let req = if let Some(j) = matches.value_of("json") {
-				match json5::from_str::<Value>(j) {
-					Ok(val) => val,
-					Err(e) => {
-						error!(log, "fail to parse json"; "err"=>%e);
-						break 'e;
-					}
-				}
-			} else {
-				json!({})
-			};
+				.map(|x| {
+					x.map(|expr| {
+						// input: A=B
+						// output: (A,B)
+						let mut s = expr.splitn(2, '=');
+						let a = s.next().expect("invalid env");
+						let b = s.next().expect("invalid env");
+						(a.to_string(), b.to_string())
+					})
+					.collect()
+				})
+				.unwrap_or_default();
+			let req: ResourceRequirement =
+				json5::from_str(matches.value_of("json").unwrap_or_default()).unwrap();
 
-			let cwd = if let Some(path) = matches.value_of("cwd") {
+			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
 				std::fs::canonicalize(path)
 			} else {
 				std::fs::canonicalize(
 					std::env::current_dir().expect("cannot read current working direrctory"),
 				)
 			}
-			.unwrap()
-			.to_str()
-			.expect("cwd is invalid utf-8")
-			.to_string();
+			.unwrap();
 
-			let value = json!({
-				"queue": matches.value_of("name").unwrap().clone(),
-				"cwd": cwd,
-				"cmd": cmd,
-				"envs": envs,
-				"require": req,
-			});
-			info!(log, "enqueue"; "payload" => %value);
-			let res = send_json("http://localhost/enqueue", "post", &value);
+			let job_spec = JobSpecification {
+				cmd,
+				cwd,
+				envs,
+				require: req,
+			};
+
+			info!(log, "enqueue"; "payload" => ?job_spec);
+
+			let client = broker::new_broker_client("localhost:7500".parse().unwrap()).unwrap();
+			let res = client.job_enqueue(job_spec).unwrap();
 			info!(log, "response"; "msg"=>res);
 		}
 		"show" => {
-			let value = if let Some(q) = matches.value_of("queue") {
-				json!({ "queue": q })
-			} else {
-				json!({})
-			};
-			info!(log, "show"; "payload" => %value);
-			let res = send_json("http://localhost/show", "post", &value);
+			// output example:
+			//
+			// [local daemon]
+			// not running
+			// pid: 11
+			// broker: none
+			// broker: listening 127.0.0.1:11
+			// worker: none
+			// worker: 2 brokers, 127.0.0.1:11, remote.com:111
 
-			if matches.is_present("json") {
-				// string -> json::Value -> pretty string
-				info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
-			} else {
-				if let Ok(queues) = serde_json::from_str::<HashMap<String, Queue>>(&res) {
-					// for each queue
-					for (q_name, q) in &queues {
-						println!();
-						let mut t = term::stdout().unwrap();
-						t.fg(term::color::WHITE).unwrap();
-						t.attr(term::Attr::Bold).unwrap();
+			// if matches.is_present("json") {
+			// 	// string -> json::Value -> pretty string
+			// 	info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
+			// } else {
+			// 	if let Ok(queues) = serde_json::from_str::<HashMap<String, Queue>>(&res) {
+			// 		// for each queue
+			// 		for (q_name, q) in &queues {
+			// 			println!();
+			// 			let mut t = term::stdout().unwrap();
+			// 			t.fg(term::color::WHITE).unwrap();
+			// 			t.attr(term::Attr::Bold).unwrap();
 
-						writeln!(t, "[Queue: {}]", q_name).unwrap();
+			// 			writeln!(t, "[Queue: {}]", q_name).unwrap();
 
-						t.reset().unwrap();
-						let mut table = Table::new();
-						table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
+			// 			t.reset().unwrap();
+			// 			let mut table = Table::new();
+			// 			table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
 
-						for q_iter in &mut [
-							&mut q.future_jobs.iter()
-								as (&mut dyn std::iter::Iterator<Item = &Job>),
-							&mut q.running_jobs.values()
-								as (&mut dyn std::iter::Iterator<Item = &Job>),
-							&mut q.past_jobs.iter() as (&mut dyn std::iter::Iterator<Item = &Job>),
-						] {
-							for job in q_iter {
-								let cmd: String = job.cmd.join(" ");
+			// 			for q_iter in &mut [
+			// 				&mut q.future_jobs.iter()
+			// 					as (&mut dyn std::iter::Iterator<Item = &Job>),
+			// 				&mut q.running_jobs.values()
+			// 					as (&mut dyn std::iter::Iterator<Item = &Job>),
+			// 				&mut q.past_jobs.iter() as (&mut dyn std::iter::Iterator<Item = &Job>),
+			// 			] {
+			// 				for job in q_iter {
+			// 					let cmd: String = job.cmd.join(" ");
 
-								let (status_cell, result) = match &job.status {
-									JobStatus::Created => (Cell::new("Pending"), "".to_string()),
-									JobStatus::Running { pid } => (
-										Cell::new("Running")
-											.with_style(Attr::ForegroundColor(color::YELLOW)),
-										format!("pid: {}", pid),
-									),
-									JobStatus::Finished {
-										exit_status: Ok(()),
-										..
-									} => (
-										Cell::new("Success")
-											.with_style(Attr::ForegroundColor(color::GREEN)),
-										"-".to_string(),
-									),
-									JobStatus::Finished {
-										exit_status: Err(err),
-										..
-									} => (
-										Cell::new("Failed")
-											.with_style(Attr::ForegroundColor(color::RED)),
-										err.to_string(),
-									),
-								};
+			// 					let (status_cell, result) = match &job.status {
+			// 						JobStatus::Created => (Cell::new("Pending"), "".to_string()),
+			// 						JobStatus::Running { pid } => (
+			// 							Cell::new("Running")
+			// 								.with_style(Attr::ForegroundColor(color::YELLOW)),
+			// 							format!("pid: {}", pid),
+			// 						),
+			// 						JobStatus::Finished {
+			// 							exit_status: Ok(()),
+			// 							..
+			// 						} => (
+			// 							Cell::new("Success")
+			// 								.with_style(Attr::ForegroundColor(color::GREEN)),
+			// 							"-".to_string(),
+			// 						),
+			// 						JobStatus::Finished {
+			// 							exit_status: Err(err),
+			// 							..
+			// 						} => (
+			// 							Cell::new("Failed")
+			// 								.with_style(Attr::ForegroundColor(color::RED)),
+			// 							err.to_string(),
+			// 						),
+			// 					};
 
-								let allocation = job
-									.allocation
-									.as_ref()
-									.map(|x| serde_json::to_string(&x).unwrap())
-									.unwrap_or("".to_string());
+			// 					let allocation = job
+			// 						.allocation
+			// 						.as_ref()
+			// 						.map(|x| serde_json::to_string(&x).unwrap())
+			// 						.unwrap_or("".to_string());
 
-								// wrap cmd and result
-								let cmd = textwrap::fill(&cmd, 30);
-								let result = textwrap::fill(&result, 20);
-								let allocation = textwrap::fill(&allocation, 20);
+			// 					// wrap cmd and result
+			// 					let cmd = textwrap::fill(&cmd, 30);
+			// 					let result = textwrap::fill(&result, 20);
+			// 					let allocation = textwrap::fill(&allocation, 20);
 
-								table.add_row(Row::new(vec![
-									Cell::new(&job.id[..8]),
-									status_cell,
-									Cell::new(&cmd),
-									Cell::new(&allocation),
-									Cell::new(&result),
-								]));
-							}
-						}
+			// 					table.add_row(Row::new(vec![
+			// 						Cell::new(&job.id[..8]),
+			// 						status_cell,
+			// 						Cell::new(&cmd),
+			// 						Cell::new(&allocation),
+			// 						Cell::new(&result),
+			// 					]));
+			// 				}
+			// 			}
 
-						if table.len() == 0 {
-							println!("no jobs");
-						}
-						table.printstd();
-					}
+			// 			if table.len() == 0 {
+			// 				println!("no jobs");
+			// 			}
+			// 			table.printstd();
+			// 		}
 
-					// job_id | status | command | allocation
-				}
-			}
+			// 		// job_id | status | command | allocation
+			// 	}
+			// }
 		}
 		"daemon" => {
 			info!(log, "This is a daemon process.");
@@ -298,18 +246,30 @@ fn main() {
 			}
 
 			let _ = std::fs::remove_file("/tmp/grass.sock");
-			server::run(log.clone()); // block
+
+			let resources: WorkerCapacity = matches
+				.value_of("json")
+				.map(|j| json5::from_str(j).unwrap())
+				.unwrap_or_default();
+
+			let broker_config = Some(broker::BrokerConfig {
+				bind_addr: "127.0.0.1:7500".parse().unwrap(),
+			});
+			let worker_config = Some(worker::WorkerConfig {
+				broker_addr: "127.0.0.1:7500".parse().unwrap(),
+				resources,
+			});
+
+			let daemon = daemon::Daemon::new(broker_config, worker_config);
+			daemon.run_sync();
+
+			// server::run(log.clone()); // block
+			// daemon::
 
 			lock.release().expect("fail to release lock");
 			info!(log, "Quit.");
 		}
 		"dashboard" => unimplemented!(),
-		"broker" => {
-			broker::run();
-		}
-		"worker" => {
-			worker::run();
-		}
 		_ => unreachable!(),
 	};
 }

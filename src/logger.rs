@@ -11,7 +11,7 @@ pub fn init_logger(path: Option<&str>) -> Logger {
 
 	let logger = if let Some(path) = path {
 		// "/tmp/grass.log"
-		let file = std::fs::File::open(path).unwrap();
+		let file = std::fs::File::create(path).unwrap();
 		let decorator = slog_term::PlainDecorator::new(file);
 		let drain_file = slog_term::CompactFormat::new(decorator).build().fuse();
 

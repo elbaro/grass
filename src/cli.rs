@@ -20,6 +20,7 @@ pub fn build_cli() -> App<'static, 'static> {
 				.about("start a daemon in background")
 				.arg(Arg::with_name("db").long("db").possible_values(&Database::variants()))
 				.arg(Arg::with_name("master").long("master").takes_value(true).help("ip:port of master server"))
+				.arg(Arg::with_name("json").long("json").takes_value(true))
 		)
 		.subcommand(SubCommand::with_name("daemon").arg(Arg::with_name("master").long("master").takes_value(true)))
 		.subcommand(
@@ -28,36 +29,6 @@ pub fn build_cli() -> App<'static, 'static> {
 				.arg(Arg::with_name("queue").long("queue").takes_value(true))
 				.arg(Arg::with_name("status").long("status").takes_value(true))
 				.arg(Arg::with_name("confirmed").long("confirmed")),
-		)
-		.subcommand(
-			// candidates:
-			// grass create-queue default --gpu 4 --cpu 2
-			// grass create-queue default --resource gpu=4 --resource cpu=2
-			// grass create-queue default --json '{gpu:4,cpu:2}'
-			SubCommand::with_name("create-queue")
-				.about("Create a new queue with a given resource constraint")
-				.arg(Arg::with_name("name").index(1).required(true))
-				.arg(Arg::with_name("file").long("file").takes_value(true))
-				.arg(Arg::with_name("json").long("json").takes_value(true))
-				.group(
-					ArgGroup::with_name("config")
-						.args(&["file", "json"])
-						.required(true),
-				),
-		)
-		.subcommand(
-			// grass delete-queue default
-			SubCommand::with_name("delete-queue")
-				.about("Delete a queue")
-				.arg(Arg::with_name("name").index(1).required(true))
-				// .arg(
-				// 	Arg::with_name("paths")
-				// 		.index(2)
-				// 		.required(true)
-				// 		.takes_value(true)
-				// 		.multiple(true),
-				// )
-				// .arg(Arg::with_name("filter").long("filter").takes_value(true)),
 		)
 		.subcommand(
 			// method1. TrailingVarArg: last positional (with or w/o --)
