@@ -1,15 +1,23 @@
 use crate::objects::{Job, JobSpecification, JobStatus, WorkerCapacity, WorkerInfo};
-use essrpc::RPCServer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-use futures::future::Future;
+use futures::compat::Executor01CompatExt;
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
+use futures::{future::Ready, Future, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures01::Future as Future01;
 
-use essrpc::transports::BincodeTransport;
-use tokio::net::TcpStream;
+use tarpc::context;
+use tarpc::server::Handler;
+
+use tokio::net::{TcpListener, TcpStream};
+use tokio::prelude::Future as TokioFuture;
+use tokio::prelude::Stream as TokioStream;
+
 #[allow(unused_imports)]
-use slog::{info,warn,error};
+use slog::{error, info, warn};
 
 pub struct BrokerConfig {
 	pub bind_addr: SocketAddr,
@@ -18,15 +26,57 @@ pub struct BrokerConfig {
 impl BrokerConfig {
 	pub fn build(self) -> Broker {
 		Broker {
-			bind_addr: self.bind_addr,
-			workers: Default::default(),
-			jobs: Default::default(),
-			pending_job_ids: Default::default(),
+			inner: Arc::new(BrokerInner {
+				bind_addr: self.bind_addr,
+				workers: Default::default(),
+				jobs: Default::default(),
+				pending_job_ids: Default::default(),
+			}),
 		}
 	}
 }
 
+tarpc::service! {
+	rpc job_update(job_id: String, status: JobStatus);
+	rpc job_request(capacity: WorkerCapacity) -> Option<Job>;
+	rpc job_enqueue(spec: JobSpecification);
+}
+
 pub struct Broker {
+	inner: Arc<BrokerInner>,
+}
+impl Broker {
+	pub fn stop(&self) {
+		self.inner.stop();
+	}
+	pub async fn run_async(&self) {
+		let listener = TcpListener::bind(&self.inner.bind_addr).unwrap();
+		let log = crate::logger::get_logger();
+
+		// let serving = tarpc::server::Server::default().incoming(transport).respond_with(serve(BrokerRPCServerImpl));
+		tarpc::init(tokio::executor::DefaultExecutor::current().compat());
+		let inner = self.inner.clone();
+		let serving = listener
+			.incoming()
+			.compat() // 0.1->0.3
+			.for_each(move |stream| {
+				// stream of Result<TcpStream,Error>
+				let stream = stream.unwrap();
+
+				info!(log, "[Broker] new worker session");
+				let transport = tarpc_bincode_transport::new(stream).fuse(); // fuse from Future03 ext trait
+				let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
+				let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
+				channel.respond_with(serve(BrokerRPCServerImpl {
+					broker: inner.clone(),
+				})) // 0.3
+			}); // 0.3 Future
+
+		await!(serving);
+	}
+}
+
+pub struct BrokerInner {
 	bind_addr: SocketAddr,
 	workers: RwLock<HashMap<String, WorkerInfo>>,
 	// worker_conns: RwLock<HashMap<String,WorkerInfo>>,
@@ -34,46 +84,33 @@ pub struct Broker {
 	pending_job_ids: RwLock<BTreeSet<String>>, // order matters. can be concurrently used by multiple worker rpc calls
 }
 
-impl Broker {
-	pub fn stop(&self) {
-
-	}
-	pub fn run_sync(&self) {
-		// let listener = tokio::net::UnixListener::bind("/tmp/broker.sock").unwrap();
-		let log = crate::logger::get_logger();
-		let listener = std::net::TcpListener::bind(&self.bind_addr).unwrap();
-		crossbeam::scope(move |scope| {
-			for stream in listener.incoming() {
-				match stream {
-					Ok(stream) => {
-						info!(log, "new worker coming");
-						let mut s = crate::rpc::BrokerRPCServer::new(
-							BrokerRPCServerImpl { broker: &self },
-							BincodeTransport::new(stream),
-						);
-						let log = log.clone();
-						scope.spawn(move |_| {
-							s.serve().unwrap();
-							info!(log, "worker left")
-						});
-					}
-					Err(err) => {
-						break;
-					}
-				}
-			}
-		})
-		.unwrap();
-	}
+impl BrokerInner {
+	pub fn stop(&self) {}
 }
 
 // instance per worker connection
-struct BrokerRPCServerImpl<'a> {
-	broker: &'a Broker,
+#[derive(Clone)]
+struct BrokerRPCServerImpl {
+	broker: Arc<BrokerInner>,
 }
 
-impl<'a> crate::rpc::Broker for BrokerRPCServerImpl<'a> {
-	fn job_update(&self, job_id: String, status: JobStatus) -> Result<String, essrpc::RPCError> {
+impl Service for BrokerRPCServerImpl {
+	/// Broker <-> Worker
+	type JobUpdateFut = Ready<()>;
+	type JobRequestFut = Ready<Option<Job>>;
+	// type WorkerIntroduceFut = Ready<()>;
+	// type WorkerHeartbeatFut = Ready<()>;
+
+	/// Broker <-> CLI
+	type JobEnqueueFut = Ready<()>;
+	// type ShowFut = Ready<String>;
+
+	fn job_update(
+		self,
+		_: context::Context,
+		job_id: String,
+		status: JobStatus,
+	) -> Self::JobUpdateFut {
 		self.broker
 			.jobs
 			.write()
@@ -81,9 +118,9 @@ impl<'a> crate::rpc::Broker for BrokerRPCServerImpl<'a> {
 			.get_mut(&job_id)
 			.unwrap()
 			.status = status;
-		Ok("update".into())
+		futures::future::ready(())
 	}
-	fn job_request(&self, capacity: WorkerCapacity) -> Result<Option<Job>, essrpc::RPCError> {
+	fn job_request(self, _: context::Context, capacity: WorkerCapacity) -> Self::JobRequestFut {
 		println!("    worker looking for a job:");
 
 		let mut jobs = self.broker.jobs.write().unwrap();
@@ -101,25 +138,25 @@ impl<'a> crate::rpc::Broker for BrokerRPCServerImpl<'a> {
 				pending_job_ids.remove(&id);
 				let mut job = jobs.get_mut(&id).unwrap();
 				job.allocation = Some(allocation);
-				return Ok(Some(job.clone()));
+				return futures::future::ready(Some(job.clone()));
 			}
 			None => {
 				// no available job
-				return Ok(None);
+				return futures::future::ready(None);
 			}
 		};
 	}
-	fn worker_introduce(&self) -> Result<String, essrpc::RPCError> {
-		println!("     new worker");
-		Ok("intro".into())
-	}
-	fn worker_heartbeat(&self) -> Result<String, essrpc::RPCError> {
-		println!("     worker heartbeat");
-		Ok("heartbeat".into())
-	}
+	// fn worker_introduce(self) -> Result<String, essrpc::RPCError> {
+	// 	println!("     new worker");
+	// 	Ok("intro".into())
+	// }
+	// fn worker_heartbeat(self) -> Result<String, essrpc::RPCError> {
+	// 	println!("     worker heartbeat");
+	// 	Ok("heartbeat".into())
+	// }
 
 	/// Broker <-> CLI
-	fn job_enqueue(&self, spec: JobSpecification) -> Result<(), essrpc::RPCError> {
+	fn job_enqueue(self, _: context::Context, spec: JobSpecification) -> Self::JobEnqueueFut {
 		let job = spec.build();
 
 		let mut jobs = self.broker.jobs.write().unwrap();
@@ -130,23 +167,23 @@ impl<'a> crate::rpc::Broker for BrokerRPCServerImpl<'a> {
 		pending_job_ids.insert(job_id);
 
 		// broadcast to clients
-		// for client in &self.clients {
+		// for client in self.clients {
 		// client.notify_new_job();
 		// }
 
-		Ok(())
+		futures::future::ready(())
 	}
-	fn show(&self) -> Result<String, essrpc::RPCError> {
-		Ok("implementing".to_string())
-	}
+	// fn show(&self) -> ShowFut {
+	// 	Ok("implementing".to_string())
+	// }
 }
 
-use crate::rpc::BrokerRPCClient;
-use essrpc::RPCClient;
-pub fn new_broker_client(
+pub async fn new_broker_client(
 	addr: SocketAddr,
-) -> Result<BrokerRPCClient<BincodeTransport<TcpStream>>, Box<std::error::Error>> {
-	let mut rt = tokio::runtime::Runtime::new().unwrap();
-	let stream = rt.block_on(TcpStream::connect(&addr))?;
-	Ok(BrokerRPCClient::new(BincodeTransport::new(stream)))
+) -> Result<Client, Box<std::error::Error + 'static>> {
+	let tcp: TcpStream = await!(TcpStream::connect(&addr).compat())?;
+	// let transport = tarpc_bincode_transport::new(tcp);
+	let transport = tarpc_bincode_transport::Transport::from(tcp);
+	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
+	Ok(client)
 }

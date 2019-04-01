@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::path::PathBuf;
 
+use futures::channel::mpsc::UnboundedSender;
+
 /// represents a capacity for one resource type, e.g. gpu.
 /// {
 /// 	"gpu": 3, // one
@@ -71,6 +73,36 @@ impl WorkerCapacity {
 		let allocation = job.allocation.as_ref().unwrap();
 		for (res_type, req) in &job.spec.require.0 {
 			*self.0.get_mut(res_type).unwrap().0.get_mut(&allocation.0[res_type]).unwrap() += *req;
+		}
+	}
+}
+
+use std::sync::RwLock;
+struct JobRunningGuard {
+	job: Job,
+	worker_capacity: RwLock<WorkerCapacity>,
+}
+
+impl JobRunningGuard {
+	fn new(job: Job, worker_capacity: RwLock<WorkerCapacity>) -> JobRunningGuard {
+		{
+			let mut cap = worker_capacity.write().unwrap();
+			cap.consume(&job);
+		}
+		JobRunningGuard {
+			job,
+			worker_capacity,
+		}
+	}
+}
+
+impl Drop for JobRunningGuard {
+	fn drop(&mut self) {
+		// 1. restore resources
+		// 2. send a msg to update job status
+		{
+			let mut cap = self.worker_capacity.write().unwrap();
+			cap.restore(&self.job);
 		}
 	}
 }
@@ -173,7 +205,7 @@ impl WorkerInfo {
 /// Job has information about running context.
 /// Job consumes resources from a queue, and returns back when finished.
 ///
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
 	pub id: String,
 	pub spec: JobSpecification,

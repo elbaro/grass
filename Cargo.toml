@@ -13,7 +13,6 @@ slog = "2.4.1"
 slog-term = "2.4.0"
 slog-async = "2.3.0"
 pidlock = "0.1.2"
-# futures = "0.1"
 curl = "0.4.19"
 uuid = {version="0.7.3", features=["v4"]}
 serde_json = "1.0.39"
@@ -35,4 +34,13 @@ once_cell = "0.1.8"
 chrono = {version="0.4.6", features=["serde"]}
 stream-cancel = "0.4.4"
 tokio = {version="0.1.18", features=["async-await-preview"]}
+tokio-process = "0.2.3"
+futures01 = {package="futures",version="0.1.25"}
 futures-preview = {version="0.3.0-alpha.13", features=["compat", "io-compat"]}
+# tarpc = {git="https://github.com/elbaro/tarpc.git", features=["serde1"], rev="93402c5"}
+# tarpc-bincode-transport = {git="https://github.com/elbaro/tarpc.git", rev="93402c5"}
+tarpc = {features=["serde1"], path="../tarpc/tarpc"}
+tarpc-bincode-transport = {path="../tarpc/bincode-transport"}
+tokio-async-await = "0.1.6"
+
+

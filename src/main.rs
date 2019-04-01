@@ -1,6 +1,9 @@
 #![feature(await_macro, async_await, futures_api)]
 #![feature(try_blocks)]
 #![feature(label_break_value)]
+#![feature(associated_type_defaults, proc_macro_hygiene)]
+#![allow(unused_imports, dead_code)]
+
 #[macro_use]
 extern crate clap;
 
@@ -9,6 +12,11 @@ use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 use slog::{error, info, o, trace, warn};
 use std::path::PathBuf;
 use std::process::Stdio;
+use tarpc::context;
+
+use futures::{FutureExt,TryFutureExt};
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
 
 mod cli;
 mod logger;
@@ -19,8 +27,6 @@ mod daemon;
 mod rpc;
 mod worker;
 
-use crate::rpc::Broker;
-use crate::rpc::Daemon;
 use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
 
 use app_dirs::{get_app_root, AppInfo};
@@ -58,7 +64,7 @@ impl AppConfig {
 
 fn main() {
 	let args = cli::build_cli().get_matches();
-	let mut app_config = AppConfig::load();
+	let mut _app_config = AppConfig::load();
 
 	let (sub, matches) = args.subcommand();
 	let matches = matches.unwrap();
@@ -93,7 +99,12 @@ fn main() {
 		}
 		"stop" => {
 			info!(log, "Stopping daemon in background.");
-			daemon::new_daemon_client().unwrap().stop().unwrap();
+			tokio::run_async(
+				async {
+					let mut client = await!(daemon::new_daemon_client()).unwrap();
+					await!(client.stop(context::current())).unwrap();
+				},
+			);
 		}
 		"enqueue" => 'e: {
 			// grass enqueue --queue q --cwd . --gpu 1 --cpu 0.5 -- python train.py ..
@@ -137,9 +148,14 @@ fn main() {
 
 			info!(log, "enqueue"; "payload" => ?job_spec);
 
-			let client = broker::new_broker_client("localhost:7500".parse().unwrap()).unwrap();
-			let res = client.job_enqueue(job_spec).unwrap();
-			info!(log, "response"; "msg"=>res);
+			tokio::run_async(
+				async {
+					let mut client =
+						await!(broker::new_broker_client("localhost:7500".parse().unwrap()))
+							.unwrap();
+					await!(client.job_enqueue(context::current(), job_spec)).unwrap();
+				},
+			);
 		}
 		"show" => {
 			// output example:

@@ -1,18 +1,24 @@
 use crate::broker::{Broker, BrokerConfig};
-use crate::rpc::DaemonRPCClient;
 use crate::worker::{Worker, WorkerConfig};
-use essrpc::transports::BincodeTransport;
-use essrpc::RPCClient;
-use essrpc::RPCServer;
 use slog::{error, info};
 
-use futures::future::Future;
-use futures::stream::Stream;
+use futures::compat::Executor01CompatExt;
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
+use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures01::Stream as Stream01;
+use tokio_async_await::compat::backward;
+
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use stream_cancel::StreamExt;
+use stream_cancel::StreamExt as StreamCancel;
 
 use crossbeam::atomic::AtomicCell;
+
+tarpc::service! {
+	rpc stop();
+}
 
 pub struct Daemon {
 	// inner+Arc is required because tokio needs 'static
@@ -42,65 +48,63 @@ impl Daemon {
 				worker: worker_config.map(|c| c.build()),
 				life_token: AtomicCell::new(Some(life_token)),
 				is_dead,
-			})
+			}),
 		}
 	}
 
 	pub fn run_sync(&self) {
-		crossbeam::scope(|scope| {
-			let log = crate::logger::get_logger();
-			info!(log, "[Daemon] spawning broker/worker");
+		let inner = self.inner.clone();
+		tokio::run_async(
+			async move {
+				let log = crate::logger::get_logger();
+				error!(log, "[Daemon] run_async start");
 
-			if self.inner.broker.is_some() {
-				let inner = self.inner.clone();
-				scope.spawn(move |_| inner.broker.as_ref().unwrap().run_sync());
-			}
-			if self.inner.worker.is_some() {
-				let inner = self.inner.clone();
-				scope.spawn(move |_| inner.worker.as_ref().unwrap().run_sync());
-			}
+				info!(log, "[Daemon] spawning broker/worker");
 
-			// daemon RPC server
-			use tokio::net::UnixListener;
-			let listener = UnixListener::bind("/tmp/grass.sock").unwrap();
-			let daemon_inner = self.inner.clone();
-			let log2 = log.clone();
-			let fut = listener
-				.incoming()
-				.take_until(self.inner.is_dead.clone())
-				.for_each(move |stream| {
-					info!(log, "[Daemon] new RPC connection");
+				if inner.broker.is_some() {
+					let inner = inner.clone();
+					tokio::spawn_async(
+						async move {
+							await!(inner.broker.as_ref().unwrap().run_async());
+						},
+					);
+				}
+				if inner.worker.is_some() {
+					let inner = inner.clone();
+					tokio::spawn_async(
+						async move {
+							await!(inner.worker.as_ref().unwrap().run_async());
+						},
+					);
+				}
 
-					let log = log.clone();
-					// let daemon_inner = daemon_inner.clone();
-					// std::thread::spawn(move || {
-					// 	let transport = BincodeTransport::new(stream);
+				// daemon RPC server
+				use tokio::net::UnixListener;
+				let listener = UnixListener::bind("/tmp/grass.sock").unwrap();
+				let inner = inner.clone();
 
-					// 	let mut s = crate::rpc::DaemonRPCServer::new(
-					// 		DaemonRPCServerImpl { daemon_inner: daemon_inner.clone() },
-					// 		transport,
-					// 	);
-					// 	let result = s.serve(); // err on normal disconnect
-					// 	if result.is_err() {
-					// 		error!(log, "RPC finished"; "result"=>?result);
-					// 	}
-					// });
+				let log2 = log.clone();
+				let fut = listener
+					.incoming()
+					.take_until(inner.is_dead.clone()) // 0.1 stream
+					.compat() // 0.3 stream
+					.for_each(move |stream| {
+						info!(log2, "[Daemon] new RPC connection");
 
+						let stream = stream.unwrap();
+						let transport = tarpc_bincode_transport::new(stream).fuse(); // fuse from Future03 ext trait
+						let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
+						let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
+						channel.respond_with(serve(DaemonRPCServerImpl {
+							daemon_inner: inner.clone(),
+						})) // 0.3
+					}); // 0.3
+				// let fut = backward::Compat::new(fut.unit_error);
 
-
-					let ch = tarpc::server::Channel {
-
-					};
-
-					futures::future::ok(())
-				})
-				.map_err(move |err| {
-					error!(log2, "UnixListener error";"err"=>%err);
-				});
-
-			tokio::run(fut);
-		})
-		.unwrap();
+				await!(fut);
+				error!(log, "[Daemon] run_sync done");
+			},
+		);
 	}
 }
 
@@ -116,27 +120,40 @@ impl DaemonInner {
 	}
 }
 
+#[derive(Clone)]
 struct DaemonRPCServerImpl {
 	daemon_inner: Arc<DaemonInner>,
 }
 
-impl crate::rpc::Daemon for DaemonRPCServerImpl {
-	fn stop(&self) -> Result<(), essrpc::RPCError> {
+// Daemon <-> CLI RPC
+use futures::future;
+use futures::future::Ready;
+
+use tarpc::context;
+
+impl Service for DaemonRPCServerImpl {
+	type StopFut = Ready<()>;
+	fn stop(self, _: context::Context) -> Self::StopFut {
 		// stop broker
 		// stop worker
 		let log = crate::logger::get_logger();
 		info!(log, "[Daemon] stop()");
 		self.daemon_inner.stop();
-		Ok(())
+		future::ready(())
 	}
 }
 
 // use std::net::UnixStream;
-use std::os::unix::net::UnixStream;
+use tokio::net::UnixStream;
 
-pub fn new_daemon_client(
-) -> Result<DaemonRPCClient<BincodeTransport<UnixStream>>, Box<std::error::Error>> {
+pub async fn new_daemon_client() -> Result<Client, Box<dyn std::error::Error + 'static>> {
+	// tarpc.server.incoming(0.3 stream of io::Result)
+	// tarpc.server.incoming(bincode_transport:listen(addr))
 
-	let stream = UnixStream::connect("/tmp/grass.sock")?;
-	Ok(DaemonRPCClient::new(BincodeTransport::new(stream)))
+	let tcp: UnixStream = await!(UnixStream::connect("/tmp/grass.sock").compat()).unwrap(); // futures03 convets future01 to Output=Result<>
+																						// let transport = tarpc_bincode_transport::new(tcp);
+	let transport = tarpc_bincode_transport::new(tcp);
+	// let t:&tarpc::Transport = &transport;
+	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
+	Ok(client)
 }
