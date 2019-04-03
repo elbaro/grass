@@ -1,10 +1,9 @@
-use rust_decimal::Decimal;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use futures::channel::mpsc::UnboundedSender;
 
@@ -21,14 +20,14 @@ use futures::channel::mpsc::UnboundedSender;
 /// 	2: 128
 /// }
 #[derive(Debug, Serialize, Clone, Default)]
-pub struct ResourceTypeCapacity(pub HashMap<String, Decimal>);
+pub struct ResourceTypeCapacity(pub HashMap<String, f64>);
 
 /// ResourceRequirement = {
 /// 	gpu: 3
 /// 	ram: 256
 /// }
-#[derive(Clone,Debug, Serialize, Deserialize, Default)]
-pub struct ResourceRequirement(pub HashMap<String, Decimal>);
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ResourceRequirement(pub HashMap<String, f64>);
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct WorkerCapacity(pub HashMap<String, ResourceTypeCapacity>);
@@ -44,7 +43,9 @@ impl WorkerCapacity {
 				// hdd1, hdd2, ..
 				for (res_instance, res_capacity) in &self.0[res_type].0 {
 					if res_capacity >= amount {
-						allocation.0.insert(res_type.to_string(), res_instance.to_string()); // HDD: HDD1
+						allocation
+							.0
+							.insert(res_type.to_string(), res_instance.to_string()); // HDD: HDD1
 						return true;
 					}
 				}
@@ -65,14 +66,28 @@ impl WorkerCapacity {
 	pub fn consume(&mut self, job: &Job) {
 		let allocation = job.allocation.as_ref().unwrap();
 		for (res_type, req) in &job.spec.require.0 {
-			*self.0.get_mut(res_type).unwrap().0.get_mut(&allocation.0[res_type]).unwrap() -= *req;
+			let v = self
+				.0
+				.get_mut(res_type)
+				.unwrap()
+				.0
+				.get_mut(&allocation.0[res_type])
+				.unwrap();
+			*v = ((*v - *req) * 1000.0).round() / 1000.0;
 		}
 	}
 
 	pub fn restore(&mut self, job: &Job) {
 		let allocation = job.allocation.as_ref().unwrap();
 		for (res_type, req) in &job.spec.require.0 {
-			*self.0.get_mut(res_type).unwrap().0.get_mut(&allocation.0[res_type]).unwrap() += *req;
+			let v = self
+				.0
+				.get_mut(res_type)
+				.unwrap()
+				.0
+				.get_mut(&allocation.0[res_type])
+				.unwrap();
+			*v = ((*v + *req) * 1000.0).round() / 1000.0;
 		}
 	}
 }
@@ -118,7 +133,7 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 				if let Some(n) = n.as_u64() {
 					let mut m = HashMap::new();
 					for i in 0..n {
-						m.insert(i.to_string(), 1.into());
+						m.insert(i.to_string(), 1.0);
 					}
 					Ok(ResourceTypeCapacity(m))
 				} else {
@@ -129,7 +144,7 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 				if let Ok(n) = &s.parse::<u32>() {
 					let mut m = HashMap::new();
 					for i in 0..*n {
-						m.insert(i.to_string(), 1.into());
+						m.insert(i.to_string(), 1.0);
 					}
 					Ok(ResourceTypeCapacity(m))
 				} else {
@@ -140,8 +155,8 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 				let mut m = HashMap::new();
 				// check if all items are numbers
 				for (i, item) in arr.iter().enumerate() {
-					if item.is_number() {
-						m.insert(i.to_string(), Decimal::from_str(&item.to_string()).unwrap());
+					if let Some(f) = item.as_f64() {
+						m.insert(i.to_string(), f);
 					} else {
 						return Err(de::Error::custom("List has a non-number"));
 					}
@@ -151,10 +166,10 @@ impl<'de> Deserialize<'de> for ResourceTypeCapacity {
 			Value::Object(obj) => {
 				let mut m = HashMap::new();
 				for (k, value) in obj.iter() {
-					let v: Decimal = if let Some(num) = value.as_f64() {
-						num::FromPrimitive::from_f64(num).unwrap()
+					let v: f64 = if let Some(num) = value.as_f64() {
+						num
 					} else if let Some(s) = value.as_str() {
-						Decimal::from_str(s).map_err(|_| {
+						s.parse::<f64>().map_err(|_| {
 							de::Error::custom(format!(
 								"Map value is not a number: {}",
 								&value.to_string()
@@ -193,14 +208,12 @@ pub enum JobStatus {
 pub struct WorkerInfo {
 	host: String,
 	runnning_since: chrono::DateTime<chrono::Utc>,
-
 }
 impl WorkerInfo {
 	fn uptime(&self) -> std::time::Duration {
-		std::time::Duration::new(0,5)
+		std::time::Duration::new(0, 5)
 	}
 }
-
 
 /// Job has information about running context.
 /// Job consumes resources from a queue, and returns back when finished.
@@ -226,7 +239,7 @@ impl JobSpecification {
 		let id = uuid::Uuid::new_v4().to_hyphenated().to_string();
 		Job {
 			id,
-			spec:self,
+			spec: self,
 			status: JobStatus::Pending,
 			allocation: Default::default(),
 		}

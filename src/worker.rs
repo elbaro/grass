@@ -3,10 +3,16 @@ use crate::objects::{Job, JobStatus, WorkerCapacity};
 use slog::{error, info};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tokio_process::CommandExt;
 
+use tokio::net::TcpStream;
+use tokio::prelude::*;
+
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::UnboundedSender;
 use futures::compat::Future01CompatExt;
+use futures::{future::Ready, StreamExt};
 use futures01::future::Future;
 
 enum Message {
@@ -20,24 +26,33 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
-	pub fn build(self) -> Worker {
+	pub fn build(self, is_dead: stream_cancel::Tripwire) -> Worker {
 		let (sender, receiver) = futures::channel::mpsc::unbounded();
 		let available = RwLock::new(self.resources.clone());
 		Worker {
-			broker_addr: self.broker_addr,
-			resources: self.resources,
-			available,
-			sender,
-			receiver,
-			jobs: Default::default(),
+			inner: Arc::new(WorkerInner {
+				broker_addr: self.broker_addr,
+				resources: self.resources,
+				available,
+				sender,
+				receiver,
+				jobs: Default::default(),
+				is_dead,
+			}),
 		}
 	}
 }
 
-use futures::channel::mpsc::UnboundedReceiver;
-use futures::channel::mpsc::UnboundedSender;
+tarpc::service! {
+	rpc status() -> String;
+	rpc on_new_job();
+}
 
 pub struct Worker {
+	inner: Arc<WorkerInner>,
+}
+
+pub struct WorkerInner {
 	broker_addr: SocketAddr,
 
 	resources: WorkerCapacity,
@@ -47,15 +62,55 @@ pub struct Worker {
 	receiver: UnboundedReceiver<Message>,
 
 	jobs: BTreeMap<String, Job>,
+
+	is_dead: stream_cancel::Tripwire,
 }
 
 impl Worker {
+	pub fn stop(&self) {
+		self.inner.stop();
+	}
+	pub async fn run_async(&self) -> Result<(), Box<dyn std::error::Error + 'static>> {
+		let log = crate::logger::get_logger();
+
+		info!(log, "[Worker] Connecting."; "broker_addr"=>&self.inner.broker_addr);
+		let stream = await!(TcpStream::connect(&self.inner.broker_addr).compat()).unwrap();
+
+		// let mux = yamux::Connection::new(stream, config, yamux::Mode::Client);
+		// let conn1 = mux.open_stream().expect("Worker conn1 failed").unwrap(); // client
+		// let conn2 = mux.open_stream().expect("Worker conn2 failed").unwrap(); // server
+
+		// client
+		let transport = tarpc_bincode_transport::new(stream);
+		let client = await!(crate::broker::new_stub(
+			tarpc::client::Config::default(),
+			transport
+		))
+		.unwrap();
+
+		// server
+		// let transport = tarpc_bincode_transport::new(conn2); //.fuse(); // fuse from Future03 ext trait
+		// let transport = transport.fuse();
+		// let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
+		// let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
+
+		// crate::compat::tokio_spawn(channel.respond_with(serve(WorkerRPCServerImpl {
+		// 	worker: self.inner.clone(),
+		// 	client: Arc::new(client),
+		// })));
+
+		info!(log, "[Worker] Connected.");
+
+		Ok(())
+	}
+}
+
+impl WorkerInner {
 	pub fn stop(&self) {}
 	pub async fn run_async(&self) {
-		// let stream = TcpStream::connect(self.broker_addr).unwrap();
-		// let mut client =
-		// 	crate::rpc::BrokerRPCClient::new(essrpc::transports::BincodeTransport::new(stream));
-		// let log = crate::logger::get_logger();
+		// job1. message-processor
+		// job2. respond to server events
+
 		// loop {
 		// 	let msg = self.receiver.recv();
 
@@ -164,5 +219,29 @@ impl Worker {
 			})
 			.unwrap();
 		Ok(())
+	}
+}
+
+// instance per worker connection
+#[derive(Clone)]
+struct WorkerRPCServerImpl {
+	worker: Arc<WorkerInner>,
+	client: Arc<crate::broker::Client>,
+}
+
+use tarpc::context;
+impl Service for WorkerRPCServerImpl {
+	type OnNewJobFut = Ready<()>;
+	fn on_new_job(self, _: context::Context) -> Self::OnNewJobFut {
+		self.worker
+			.sender
+			.unbounded_send(Message::TrySchedule)
+			.unwrap();
+		futures::future::ready(())
+	}
+
+	type StatusFut = Ready<String>;
+	fn status(self, _: context::Context) -> Self::StatusFut {
+		futures::future::ready("asdf".to_string())
 	}
 }

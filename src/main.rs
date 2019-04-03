@@ -10,19 +10,22 @@ extern crate clap;
 use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tarpc::context;
 
-use futures::{FutureExt,TryFutureExt};
+use futures::compat::Executor01CompatExt;
 use futures::compat::Future01CompatExt;
 use futures::compat::Stream01CompatExt;
+use futures::{FutureExt, TryFutureExt};
 
 mod cli;
 mod logger;
 mod objects;
 
 mod broker;
+mod compat;
 mod daemon;
 mod rpc;
 mod worker;
@@ -63,6 +66,8 @@ impl AppConfig {
 }
 
 fn main() {
+	env_logger::init();
+
 	let args = cli::build_cli().get_matches();
 	let mut _app_config = AppConfig::load();
 
@@ -98,16 +103,19 @@ fn main() {
 			cmd.spawn().expect("Daemon process failed to start.");
 		}
 		"stop" => {
-			info!(log, "Stopping daemon in background.");
-			tokio::run_async(
-				async {
+			info!(log, "[Command] Stopping a local daemon.");
+			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
+			compat::tokio_run(
+				async move {
 					let mut client = await!(daemon::new_daemon_client()).unwrap();
+					info!(log, "Stopping.");
 					await!(client.stop(context::current())).unwrap();
+					info!(log, "Done.");
 				},
 			);
 		}
 		"enqueue" => 'e: {
-			// grass enqueue --queue q --cwd . --gpu 1 --cpu 0.5 -- python train.py ..
+			// grass enqueue --cwd . --req "{gpu:1}" -- python train.py ..
 			let cmd: Vec<String> = matches
 				.values_of("cmd")
 				.unwrap()
@@ -128,7 +136,7 @@ fn main() {
 				})
 				.unwrap_or_default();
 			let req: ResourceRequirement =
-				json5::from_str(matches.value_of("json").unwrap_or_default()).unwrap();
+				json5::from_str(matches.value_of("req").unwrap_or_default()).unwrap();
 
 			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
 				std::fs::canonicalize(path)
@@ -139,6 +147,12 @@ fn main() {
 			}
 			.unwrap();
 
+			let broker_addr: SocketAddr = matches
+				.value_of("broker")
+				.unwrap_or("127.0.0.1:7500")
+				.parse()
+				.expect("broker address should be ip:port");
+
 			let job_spec = JobSpecification {
 				cmd,
 				cwd,
@@ -146,14 +160,12 @@ fn main() {
 				require: req,
 			};
 
-			info!(log, "enqueue"; "payload" => ?job_spec);
-
-			tokio::run_async(
-				async {
-					let mut client =
-						await!(broker::new_broker_client("localhost:7500".parse().unwrap()))
-							.unwrap();
+			compat::tokio_run(
+				async move {
+					let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
+					info!(log, "Enqueueing."; "job_spec" => ?job_spec);
 					await!(client.job_enqueue(context::current(), job_spec)).unwrap();
+					info!(log, "Enqueued");
 				},
 			);
 		}
@@ -168,92 +180,86 @@ fn main() {
 			// worker: none
 			// worker: 2 brokers, 127.0.0.1:11, remote.com:111
 
-			// if matches.is_present("json") {
-			// 	// string -> json::Value -> pretty string
-			// 	info!(log, "response"; "msg"=>serde_json::from_str::<Value>(&res).and_then(|v| serde_json::to_string_pretty(&v)).as_ref().unwrap_or(&res));
-			// } else {
-			// 	if let Ok(queues) = serde_json::from_str::<HashMap<String, Queue>>(&res) {
-			// 		// for each queue
-			// 		for (q_name, q) in &queues {
-			// 			println!();
-			// 			let mut t = term::stdout().unwrap();
-			// 			t.fg(term::color::WHITE).unwrap();
-			// 			t.attr(term::Attr::Bold).unwrap();
+			compat::tokio_run(
+				async move {
+					let mut t = term::stdout().unwrap();
+					// query daemon
+					println!("[Daemon]");
+					{
+						println!("N/A");
+						// let mut client = await!(daemon::new_daemon_client()).unwrap();
+						// let status = await!(client.status(context::current())).unwrap();
+						// info!(log, "[Broker]");
+					}
 
-			// 			writeln!(t, "[Queue: {}]", q_name).unwrap();
+					// query broker
 
-			// 			t.reset().unwrap();
-			// 			let mut table = Table::new();
-			// 			table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
+					let broker_addr = "127.0.0.1:7500".parse().unwrap();
+					let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
+					let info = await!(client.info(context::current())).unwrap();
+					t.fg(term::color::WHITE).unwrap();
+					t.attr(term::Attr::Bold).unwrap();
+					writeln!(t, "[Broker @ {:?}]", &info.bind_addr).unwrap();
+					t.reset().unwrap();
 
-			// 			for q_iter in &mut [
-			// 				&mut q.future_jobs.iter()
-			// 					as (&mut dyn std::iter::Iterator<Item = &Job>),
-			// 				&mut q.running_jobs.values()
-			// 					as (&mut dyn std::iter::Iterator<Item = &Job>),
-			// 				&mut q.past_jobs.iter() as (&mut dyn std::iter::Iterator<Item = &Job>),
-			// 			] {
-			// 				for job in q_iter {
-			// 					let cmd: String = job.cmd.join(" ");
+					let mut table = Table::new();
+					table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
 
-			// 					let (status_cell, result) = match &job.status {
-			// 						JobStatus::Created => (Cell::new("Pending"), "".to_string()),
-			// 						JobStatus::Running { pid } => (
-			// 							Cell::new("Running")
-			// 								.with_style(Attr::ForegroundColor(color::YELLOW)),
-			// 							format!("pid: {}", pid),
-			// 						),
-			// 						JobStatus::Finished {
-			// 							exit_status: Ok(()),
-			// 							..
-			// 						} => (
-			// 							Cell::new("Success")
-			// 								.with_style(Attr::ForegroundColor(color::GREEN)),
-			// 							"-".to_string(),
-			// 						),
-			// 						JobStatus::Finished {
-			// 							exit_status: Err(err),
-			// 							..
-			// 						} => (
-			// 							Cell::new("Failed")
-			// 								.with_style(Attr::ForegroundColor(color::RED)),
-			// 							err.to_string(),
-			// 						),
-			// 					};
+					for job in &info.jobs {
+						let cmd: String = job.spec.cmd.join(" ");
 
-			// 					let allocation = job
-			// 						.allocation
-			// 						.as_ref()
-			// 						.map(|x| serde_json::to_string(&x).unwrap())
-			// 						.unwrap_or("".to_string());
+						let (status_cell, result) = match &job.status {
+							JobStatus::Pending => (Cell::new("Pending"), "".to_string()),
+							JobStatus::Running { pid } => (
+								Cell::new("Running")
+									.with_style(Attr::ForegroundColor(color::YELLOW)),
+								format!("pid: {}", pid),
+							),
+							JobStatus::Finished {
+								exit_status: Ok(()),
+								..
+							} => (
+								Cell::new("Success")
+									.with_style(Attr::ForegroundColor(color::GREEN)),
+								"-".to_string(),
+							),
+							JobStatus::Finished {
+								exit_status: Err(err),
+								..
+							} => (
+								Cell::new("Failed").with_style(Attr::ForegroundColor(color::RED)),
+								err.to_string(),
+							),
+						};
 
-			// 					// wrap cmd and result
-			// 					let cmd = textwrap::fill(&cmd, 30);
-			// 					let result = textwrap::fill(&result, 20);
-			// 					let allocation = textwrap::fill(&allocation, 20);
+						let allocation: String = job
+							.allocation
+							.as_ref()
+							.map(|x| serde_json::to_string(&x).unwrap())
+							.unwrap_or("".to_string());
 
-			// 					table.add_row(Row::new(vec![
-			// 						Cell::new(&job.id[..8]),
-			// 						status_cell,
-			// 						Cell::new(&cmd),
-			// 						Cell::new(&allocation),
-			// 						Cell::new(&result),
-			// 					]));
-			// 				}
-			// 			}
+						// wrap cmd and result
+						let cmd = textwrap::fill(&cmd, 30);
+						let result = textwrap::fill(&result, 20);
+						let allocation = textwrap::fill(&allocation, 20);
 
-			// 			if table.len() == 0 {
-			// 				println!("no jobs");
-			// 			}
-			// 			table.printstd();
-			// 		}
+						table.add_row(Row::new(vec![
+							Cell::new(&job.id[..8]),
+							status_cell,
+							Cell::new(&cmd),
+							Cell::new(&allocation),
+							Cell::new(&result),
+						]));
+					}
 
-			// 		// job_id | status | command | allocation
-			// 	}
-			// }
+					if table.len() == 0 {
+						println!("no jobs");
+					}
+					table.printstd();
+				}, // async move
+			); // tokio_run
 		}
 		"daemon" => {
-			info!(log, "This is a daemon process.");
 			let mut lock = pidlock::Pidlock::new("/tmp/grass.pid");
 			if let Err(e) = lock.acquire() {
 				error!(log, "Failed to get lockfile. Quit"; "err"=>format!("{:?}", e), "lock"=>"/tmp/grass.pid");
