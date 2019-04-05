@@ -1,3 +1,5 @@
+#![recursion_limit="128"]
+
 #![feature(await_macro, async_await, futures_api)]
 #![feature(try_blocks)]
 #![feature(label_break_value)]
@@ -29,6 +31,7 @@ mod compat;
 mod daemon;
 mod rpc;
 mod worker;
+mod oneshot;
 
 use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
 
@@ -136,7 +139,7 @@ fn main() {
 				})
 				.unwrap_or_default();
 			let req: ResourceRequirement =
-				json5::from_str(matches.value_of("req").unwrap_or_default()).unwrap();
+				matches.value_of("req").map(|j| json5::from_str(j).expect("wrong json5 format")).unwrap_or_default();
 
 			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
 				std::fs::canonicalize(path)

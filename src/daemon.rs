@@ -14,7 +14,7 @@ use tokio_async_await::compat::backward;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use stream_cancel::StreamExt as StreamCancel;
+use crate::oneshot::StreamExt as OneshotStreamExt;
 
 use crossbeam::atomic::AtomicCell;
 
@@ -31,8 +31,8 @@ struct DaemonInner {
 	pub broker: Option<Broker>, // optionally has bind addr
 	pub worker: Option<Worker>, // optionally has brok addr
 
-	life_token: AtomicCell<Option<stream_cancel::Trigger>>,
-	is_dead: stream_cancel::Tripwire,
+	stopper: crate::oneshot::OneshotSender<()>,
+	stop_flag: crate::oneshot::OneshotFlag<()>,
 }
 
 impl Drop for DaemonInner {
@@ -43,13 +43,13 @@ impl Drop for DaemonInner {
 
 impl Daemon {
 	pub fn new(broker_config: Option<BrokerConfig>, worker_config: Option<WorkerConfig>) -> Daemon {
-		let (life_token, is_dead) = stream_cancel::Tripwire::new();
+		let (stopper, stop_flag) = crate::oneshot::new::<()>();
 		Daemon {
 			inner: Arc::new(DaemonInner {
-				broker: broker_config.map(|c| c.build(is_dead.clone())),
-				worker: worker_config.map(|c| c.build(is_dead.clone())),
-				life_token: AtomicCell::new(Some(life_token)),
-				is_dead,
+				broker: broker_config.map(|c| c.build(stop_flag.clone())),
+				worker: worker_config.map(|c| c.build(stop_flag.clone())),
+				stopper: stopper,
+				stop_flag,
 			}),
 		}
 	}
@@ -87,8 +87,8 @@ impl Daemon {
 
 				let mut listener = listener
 					.incoming()
-					.take_until(inner.is_dead.clone()) // 0.1 stream
-					.compat();
+					.compat()
+					.take_until(inner.stop_flag.clone().map(|_| ()));
 
 				while let Some(stream) = await!(listener.next()) {
 					info!(log, "[Daemon] new RPC connection");
@@ -98,8 +98,7 @@ impl Daemon {
 						async move {
 							let stream = stream.unwrap();
 							let transport = tarpc_bincode_transport::new(stream).fuse(); // fuse from Future03 ext trait
-							let (sender, _recv) =
-								futures::channel::mpsc::unbounded::<SocketAddr>();
+							let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
 							let channel =
 								tarpc::server::Channel::new_simple_channel(transport, sender);
 							await!(channel.respond_with(serve(DaemonRPCServerImpl {
@@ -109,23 +108,17 @@ impl Daemon {
 							info!(log, "[Daemon] Connection closed");
 						},
 					);
-				};
+				}
 			},
 		);
 		let log = crate::logger::get_logger();
-		info!(log, "[Daemon] Exit.");
+		info!(log, "[Daemon] exit");
 	}
 }
 
 impl DaemonInner {
 	pub fn stop(&self) {
-		self.life_token.store(None);
-		if let Some(broker) = self.broker.as_ref() {
-			broker.stop();
-		}
-		if let Some(worker) = self.worker.as_ref() {
-			worker.stop();
-		}
+		let _ = self.stopper.send(());
 	}
 }
 

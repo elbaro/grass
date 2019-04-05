@@ -22,21 +22,21 @@ use tokio::prelude::*;
 #[allow(unused_imports)]
 use slog::{error, info, warn};
 
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub struct BrokerConfig {
 	pub bind_addr: SocketAddr,
 }
 
 impl BrokerConfig {
-	pub fn build(self, is_dead: stream_cancel::Tripwire) -> Broker {
+	pub fn build(self, stop_flag: crate::oneshot::OneshotFlag) -> Broker {
 		Broker {
 			inner: Arc::new(BrokerInner {
 				bind_addr: self.bind_addr,
 				workers: Default::default(),
 				jobs: Default::default(),
 				pending_job_ids: Default::default(),
-				is_dead,
+				stop_flag,
 			}),
 		}
 	}
@@ -51,6 +51,7 @@ tarpc::service! {
 }
 
 pub struct Broker {
+	// reason for inner pattern
 	inner: Arc<BrokerInner>,
 }
 
@@ -63,64 +64,80 @@ impl Broker {
 		info!(log, "[Broker] Listening."; "bind"=>%self.inner.bind_addr);
 
 		let listener = TcpListener::bind(&self.inner.bind_addr).unwrap();
-		let mut serving = listener.incoming().compat();
+
+		// let mut serving = listener.incoming().compat();
+		use crate::oneshot::StreamExt as OneshotStreamExt;
+		let mut serving = listener
+			.incoming()
+			.compat()
+			.take_until(self.inner.stop_flag.clone().map(|_| ()));
+
 		let inner = self.inner.clone();
 		while let Some(stream) = await!(serving.next()) {
 			clone_all::clone_all!(log, inner);
 			crate::compat::tokio_spawn(
 				async move {
 					// let inner = (&inner).clone();
-					info!(log, "[Broker] New client (worker or CLI).");
+					let session_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
+					info!(log, "[Broker] New session";"id"=>&session_id);
 					let stream = stream.unwrap();
 
 					// yamux
-					// let config = {
-					// 	let mut c = yamux::Config::default();
-					// 	c.set_max_buffer_size(1);
-					// 	c
-					// };
-					// let mut mux = yamux::Connection::new(stream, config, yamux::Mode::Server);
-					// let stream = await!(mux.next()).unwrap().unwrap();
+					let mut mux = yamux::Connection::new(
+						stream,
+						yamux::Config::default(),
+						yamux::Mode::Server,
+					);
+					let stream = await!(mux.next()).unwrap().unwrap();
 
-					// server
-					let transport = tarpc_bincode_transport::new(stream); //.fuse();  // fuse from Future03 ext trait
-					let transport = transport.fuse();
+					// stream1: rpc server
+					let transport = tarpc_bincode_transport::new(stream).fuse(); //.fuse(∂);  // fuse from Future03 ext trait
 					let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
 					let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
 
-					await!(channel.respond_with(serve(BrokerRPCServerImpl {
-						broker: inner.clone(),
-					})));
+					let mut session_serve = channel
+						.respond_with(serve(BrokerRPCServerImpl {
+							broker: inner.clone(),
+						}))
+						.fuse();
 
-					info!(log, "[Broker] New client closed.");
+					// stream2: client (optional)
+					let mut fut2 = Box::pin(
+						async {
+							if let Some(Ok(conn2)) = await!(mux.next()) {
+								// may block, but exit with flag
+								let transport = tarpc_bincode_transport::new(conn2);
+								let client = await!(crate::worker::new_stub(
+									tarpc::client::Config::default(),
+									transport
+								))
+								.unwrap();
 
-					// if CLI, ignore this. If worker, open 2nd stream.
-					// await!(
-					// 	async {
-					// 		if let Some(Ok(conn2)) = await!(mux.next()) {
-					// 			let worker_session_id =
-					// 				uuid::Uuid::new_v4().to_hyphenated().to_string();
-					// 			info!(log, "[Broker] new worker session"; "worker_session_id"=>&worker_session_id);
+								await!(inner.workers.lock()).insert(session_id.clone(), client);
+							}
+							await!(inner.stop_flag.clone()).unwrap();
+						},
+					)
+					.fuse();
 
-					// 			let transport = tarpc_bincode_transport::new(conn2);
-					// 			let client = await!(crate::worker::new_stub(
-					// 				tarpc::client::Config::default(),
-					// 				transport
-					// 			))
-					// 			.unwrap();
-
-					// 			await!(inner.workers.lock())
-					// 				.insert(worker_session_id.clone(), client);
-					// 		}
-					// 	}
-					// );
-
-					// clean up
-					// remove worker
-					// inner.workers.lock().unwrap().remove(worker_session_id.clone());
+					let mut stop_flag = inner.stop_flag.clone().fuse();
+					futures::select! {
+						_ = session_serve => {
+							info!(log, "[Broker] Session closed"; "reason" => "TCP connection closed by peer");
+						},
+						_ = fut2 => {
+							info!(log, "[Broker] Session closed"; "reason" => "TCP connection closed by peer");
+						},
+						_ = stop_flag => {
+							info!(log, "[Broker] Session closed"; "reason" => "STOP signal");
+						},
+					};
+					// clean-up
+					await!(inner.workers.lock()).remove(&session_id);
 				},
 			);
 		}
+		info!(log, "[Broker] exit");
 	}
 }
 
@@ -130,21 +147,19 @@ pub struct BrokerInner {
 	// worker_conns: Mutex<HashMap<String,WorkerInfo>>,
 	jobs: Mutex<BTreeMap<String, Job>>, // order matters. can be concurrently used by multiple worker rpc calls
 	pending_job_ids: Mutex<BTreeSet<String>>, // order matters. can be concurrently used by multiple worker rpc calls
-	is_dead: stream_cancel::Tripwire,
+	stop_flag: crate::oneshot::OneshotFlag<()>,
 }
 
 impl BrokerInner {
 	pub fn stop(&self) {}
 }
 
-
-#[derive(Debug,Serialize,Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BrokerInfo {
 	pub bind_addr: SocketAddr,
 	pub jobs: Vec<Job>,
 	pub workers: Vec<String>,
 }
-
 
 // instance per worker connection
 #[derive(Clone)]
@@ -201,14 +216,6 @@ impl Service for BrokerRPCServerImpl {
 			},
 		)
 	}
-	// fn worker_introduce(self) -> Result<String, essrpc::RPCError> {
-	// 	println!("     new worker");
-	// 	Ok("intro".into())
-	// }
-	// fn worker_heartbeat(self) -> Result<String, essrpc::RPCError> {
-	// 	println!("     worker heartbeat");
-	// 	Ok("heartbeat".into())
-	// }
 
 	/// Broker <-> CLI
 	type JobEnqueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -237,16 +244,18 @@ impl Service for BrokerRPCServerImpl {
 	}
 
 	type InfoFut = Pin<Box<dyn Future<Output = BrokerInfo> + Send>>;
-	fn info(self, _:context::Context) -> Self::InfoFut {
-		Box::pin(async move {
-			let jobs = await!(self.broker.jobs.lock());
+	fn info(self, _: context::Context) -> Self::InfoFut {
+		Box::pin(
+			async move {
+				let jobs = await!(self.broker.jobs.lock());
 
-			BrokerInfo {
-				bind_addr: self.broker.bind_addr.clone(),
-				jobs: jobs.values().cloned().collect(),
-				workers: Default::default(),
-			}
-		})
+				BrokerInfo {
+					bind_addr: self.broker.bind_addr.clone(),
+					jobs: jobs.values().cloned().collect(),
+					workers: Default::default(),
+				}
+			},
+		)
 	}
 }
 
@@ -257,14 +266,11 @@ pub async fn new_broker_client(
 	info!(log, "[Client] Connecting to Broker."; "addr"=>&addr);
 	let stream: TcpStream = await!(TcpStream::connect(&addr).compat())?;
 
-	// let config = {
-	// 	let mut c = yamux::Config::default();
-	// 	c.set_max_buffer_size(1);
-	// 	c
-	// };
-
-	// let mux = yamux::Connection::new(stream, config, yamux::Mode::Client);
-	// let stream = mux.open_stream().expect("[Client] Failed to open 1st stream").unwrap(); // client
+	let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
+	let stream = mux
+		.open_stream()
+		.expect("[Client] Failed to open 1st stream")
+		.unwrap(); // client
 
 	let transport = tarpc_bincode_transport::Transport::from(stream);
 	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;

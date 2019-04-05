@@ -29,9 +29,7 @@ self_update = "0.5.1"
 app_dirs = "1.2.1"
 toml = "0.5.0"
 once_cell = "0.1.8"
-# essrpc = {version="0.2.0", path="essrpc/essrpc", features=["bincode_transport"]}
 chrono = {version="0.4.6", features=["serde"]}
-stream-cancel = "0.4.4"
 tokio = {version="0.1.18", features=["async-await-preview"]}
 tokio-process = "0.2.3"
 futures01 = {package="futures",version="0.1.25"}
@@ -42,3 +40,4 @@ tarpc = {features=["serde1"], path="../tarpc/tarpc"}
 tarpc-bincode-transport = {path="../tarpc/bincode-transport"}
 tokio-async-await = "0.1.6"
 yamux = "0.1.9"
+pin-utils = "0.1.0-alpha.4"
