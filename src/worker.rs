@@ -73,7 +73,7 @@ pub struct WorkerInner {
 
 impl Worker {
 	pub async fn run_async(&self) -> Result<(), Box<dyn std::error::Error + 'static>> {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 
 		info!(log, "[Worker] Connecting."; "broker_addr"=>&self.inner.broker_addr);
 		let stream = await!(TcpStream::connect(&self.inner.broker_addr).compat()).unwrap();
@@ -123,9 +123,7 @@ impl Worker {
 								let job = &await!(inner.jobs.lock())[&job_id];
 								available.restore(job);
 
-								inner.sender
-									.unbounded_send(Message::TrySchedule)
-									.unwrap();
+								inner.sender.unbounded_send(Message::TrySchedule).unwrap();
 							}
 							await!(client.job_update(context::current(), job_id, status)).unwrap();
 						}
@@ -269,7 +267,7 @@ struct WorkerRPCServerImpl {
 impl Service for WorkerRPCServerImpl {
 	type OnNewJobFut = Ready<()>;
 	fn on_new_job(self, _: context::Context) -> Self::OnNewJobFut {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Worker] on_new_job()");
 		self.worker
 			.sender
@@ -283,7 +281,7 @@ impl Service for WorkerRPCServerImpl {
 
 	type StatusFut = Ready<String>;
 	fn status(self, _: context::Context) -> Self::StatusFut {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Worker] status()");
 		futures::future::ready("[dummy status]".to_string())
 	}

@@ -61,7 +61,7 @@ impl Broker {
 		self.inner.stop();
 	}
 	pub async fn run_async(&self) {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Broker] Listening."; "bind"=>%self.inner.bind_addr);
 
 		let listener = TcpListener::bind(&self.inner.bind_addr).unwrap();
@@ -185,7 +185,7 @@ impl Service for BrokerRPCServerImpl {
 		job_id: String,
 		status: JobStatus,
 	) -> Self::JobUpdateFut {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Broker] job_update()");
 		Box::pin(
 			async move {
@@ -199,7 +199,7 @@ impl Service for BrokerRPCServerImpl {
 
 	type JobRequestFut = std::pin::Pin<Box<dyn Future<Output = Option<Job>> + Send>>;
 	fn job_request(self, _: context::Context, capacity: WorkerCapacity) -> Self::JobRequestFut {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Broker] job_request()"; "capacity"=>?capacity);
 		Box::pin(
 			async move {
@@ -232,7 +232,7 @@ impl Service for BrokerRPCServerImpl {
 	/// Broker <-> CLI
 	type JobEnqueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn job_enqueue(self, _: context::Context, spec: JobSpecification) -> Self::JobEnqueueFut {
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Broker] enqueue()"; "spec"=>?spec);
 		Box::pin(
 			async move {
@@ -274,7 +274,7 @@ impl Service for BrokerRPCServerImpl {
 pub async fn new_broker_client(
 	addr: SocketAddr,
 ) -> Result<Client, Box<dyn std::error::Error + 'static>> {
-	let log = crate::logger::get_logger();
+	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Broker."; "addr"=>&addr);
 	let stream: TcpStream = await!(TcpStream::connect(&addr).compat())?;
 

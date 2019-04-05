@@ -1,11 +1,7 @@
-use once_cell::sync::OnceCell;
 use slog::Logger;
 use slog::{o, Drain};
-use std::sync::Mutex;
 
-static LOGGER: OnceCell<Mutex<Logger>> = OnceCell::INIT;
-
-pub fn init_logger(path: Option<&str>) -> Logger {
+pub fn create_logger(path: Option<&str>) -> Logger {
 	let decorator = slog_term::TermDecorator::new().build();
 	let drain_term = slog_term::CompactFormat::new(decorator).build().fuse();
 
@@ -24,15 +20,5 @@ pub fn init_logger(path: Option<&str>) -> Logger {
 		slog::Logger::root(drain, o!())
 	};
 
-	LOGGER.set(Mutex::new(logger)).unwrap();
-	get_logger()
-}
-
-pub fn get_logger() -> Logger {
-	LOGGER
-		.get()
-		.expect("logger is not initialized")
-		.lock()
-		.unwrap()
-		.clone()
+	return logger;
 }

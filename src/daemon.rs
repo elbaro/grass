@@ -59,7 +59,7 @@ impl Daemon {
 		let inner = self.inner.clone();
 		crate::compat::tokio_run(
 			async move {
-				let log = crate::logger::get_logger();
+				let log = slog_scope::logger();
 				info!(log, "[Daemon] Running.");
 
 				if inner.broker.is_some() {
@@ -111,7 +111,7 @@ impl Daemon {
 				}
 			},
 		);
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Daemon] exit");
 	}
 }
@@ -138,7 +138,7 @@ impl Service for DaemonRPCServerImpl {
 	fn stop(self, _: context::Context) -> Self::StopFut {
 		// stop broker
 		// stop worker
-		let log = crate::logger::get_logger();
+		let log = slog_scope::logger();
 		info!(log, "[Daemon] stop()");
 		self.daemon_inner.stop();
 		future::ready(())
@@ -149,7 +149,7 @@ use tokio::net::UnixStream;
 use tokio::prelude::*;
 
 pub async fn new_daemon_client() -> Result<Client, Box<dyn std::error::Error + 'static>> {
-	let log = crate::logger::get_logger();
+	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Daemon.");
 	let tcp: UnixStream = await!(UnixStream::connect("/tmp/grass.sock").compat()).unwrap();
 	let transport = tarpc_bincode_transport::Transport::from(tcp);

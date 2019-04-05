@@ -77,10 +77,14 @@ fn main() {
 	let matches = matches.unwrap();
 
 	let log = if sub == "daemon" {
-		logger::init_logger(Some("/tmp/grass.log"))
+		// logger::init_logger(Some("/tmp/grass.log"))
+		logger::create_logger(Some("/tmp/grass.log"))
 	} else {
-		logger::init_logger(None)
+		logger::create_logger(None)
 	};
+
+	let _log_guard = slog_scope::set_global_logger(log);
+	let log = slog_scope::logger();
 
 	match sub.as_ref() {
 		"start" => {
@@ -271,27 +275,44 @@ fn main() {
 			); // tokio_run
 		}
 		"daemon" => {
+			// let log = slog_scope::logger();
 			let mut lock = pidlock::Pidlock::new("/tmp/grass.pid");
 			if let Err(e) = lock.acquire() {
 				error!(log, "Failed to get lockfile. Quit"; "err"=>format!("{:?}", e), "lock"=>"/tmp/grass.pid");
-				drop(log);
-				std::process::exit(1);
+				// drop(_log_guard);
+				panic!("asdf");
 			}
 
 			let _ = std::fs::remove_file("/tmp/grass.sock");
 
-			let resources: WorkerCapacity = matches
-				.value_of("resources")
-				.map(|j| WorkerCapacity::from_json_str(&j).expect("invalid json5"))
-				.unwrap_or_default();
+			let broker_config = if matches.is_present("no-broker") {
+				None
+			} else {
+				Some(broker::BrokerConfig {
+					bind_addr: matches
+						.value_of("bind")
+						.unwrap_or("127.0.0.1:7500")
+						.parse()
+						.expect("fail to parse --bind address"),
+				})
+			};
 
-			let broker_config = Some(broker::BrokerConfig {
-				bind_addr: "127.0.0.1:7500".parse().unwrap(),
-			});
-			let worker_config = Some(worker::WorkerConfig {
-				broker_addr: "127.0.0.1:7500".parse().unwrap(),
-				resources,
-			});
+			let worker_config = if matches.is_present("no-worker") {
+				None
+			} else {
+				let resources: WorkerCapacity = matches
+					.value_of("resources")
+					.map(|j| WorkerCapacity::from_json_str(&j).expect("invalid json5"))
+					.unwrap_or_default();
+				Some(worker::WorkerConfig {
+					broker_addr: matches
+						.value_of("connect")
+						.unwrap_or("127.0.0.1:7500")
+						.parse()
+						.expect("fail to parse --connect address"),
+					resources,
+				})
+			};
 
 			let daemon = daemon::Daemon::new(broker_config, worker_config);
 			daemon.run_sync();
