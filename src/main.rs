@@ -68,8 +68,6 @@ impl AppConfig {
 }
 
 fn main() {
-	env_logger::init();
-
 	let args = cli::build_cli().get_matches();
 	let mut _app_config = AppConfig::load();
 
