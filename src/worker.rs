@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio_process::CommandExt;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio_process::CommandExt;
 
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
@@ -41,7 +41,7 @@ impl WorkerConfig {
 				jobs: Default::default(),
 				stop_flag,
 			}),
-			receiver:Mutex::new(receiver),
+			receiver: Mutex::new(receiver),
 		}
 	}
 }
@@ -67,7 +67,7 @@ pub struct WorkerInner {
 	resources: WorkerCapacity,
 	available: Mutex<WorkerCapacity>,
 	sender: UnboundedSender<Message>,
-	jobs: BTreeMap<String, Job>,
+	jobs: Mutex<BTreeMap<String, Job>>,
 	stop_flag: crate::oneshot::OneshotFlag<()>,
 }
 
@@ -88,6 +88,7 @@ impl Worker {
 			transport
 		))
 		.unwrap();
+		await!(client.ping(context::current())).unwrap();
 
 		// server
 		let stream = mux.open_stream().expect("Worker failed").unwrap(); // server
@@ -105,39 +106,58 @@ impl Worker {
 
 		let mut stop_flag = self.inner.stop_flag.clone().fuse();
 
-
 		let inner = self.inner.clone();
 		let mut receiver = await!(self.receiver.lock());
 		let log_move = log.clone();
-		let mut msg_process = Box::pin(async move {
-			let log = log_move;
-			while let Some(msg) = await!(receiver.next()) {
-				match msg {
-					Message::JobUpdate { job_id, status } => {
-						info!(log, "[Broker] JobUpdate"; "status"=>?status);
+		let mut msg_process = Box::pin(
+			async move {
+				let log = log_move;
+				while let Some(msg) = await!(receiver.next()) {
+					match msg {
+						Message::JobUpdate { job_id, status } => {
+							info!(log, "[Worker] sending JobUpdate"; "job_id"=>&job_id, "status"=>?status);
 
-						if let JobStatus::Finished { .. } = status {
-							// restore
-							let mut available = await!(inner.available.lock());
-							available.restore(&inner.jobs[&job_id]);
-						}
-						await!(client.job_update(context::current(), job_id, status)).unwrap();
-					}
-					Message::TrySchedule => {
-						let mut available = await!(inner.available.lock());
+							if let JobStatus::Finished { .. } = status {
+								// restore
+								let mut available = await!(inner.available.lock());
+								let job = &await!(inner.jobs.lock())[&job_id];
+								available.restore(job);
 
-						match await!(client.job_request(context::current(), available.clone())).unwrap() {
-							Some(job) => {
-								available.consume(&job);
-								// spawn, consume
-								await!(inner.spawn_job(job)).unwrap();
+								inner.sender
+									.unbounded_send(Message::TrySchedule)
+									.unwrap();
 							}
-							None => {}
+							await!(client.job_update(context::current(), job_id, status)).unwrap();
 						}
-					}
-				};
-			}
-		}).fuse();
+						Message::TrySchedule => {
+							info!(log, "[Worker] msg: TrySchedule; JobRequest");
+							let mut available = await!(inner.available.lock());
+
+							match await!(client.job_request(context::current(), available.clone()))
+								.expect("[Worker] broker_client.job_request)_ failed")
+							{
+								Some(job) => {
+									info!(log, "[Worker] received new job");
+									// register job
+									await!(inner.jobs.lock()).insert(job.id.clone(), job.clone());
+
+									println!("======== {:?}", (&*available));
+
+									available.consume(&job);
+									// spawn, consume
+									let inner = inner.clone();
+									crate::compat::tokio_spawn(inner.spawn_job(job));
+								}
+								None => {
+									info!(log, "[Worker] received no job");
+								}
+							}
+						}
+					};
+				}
+			},
+		)
+		.fuse();
 
 		let log = log.clone();
 		futures::select! {
@@ -159,61 +179,63 @@ impl Worker {
 }
 
 impl WorkerInner {
-
-	async fn spawn_job(&self, mut job: Job) -> Result<(), Box<std::error::Error>> {
+	async fn spawn_job(self: Arc<Self>, mut job: Job) {
 		use std::process::ExitStatus;
 		use std::process::Stdio;
 
-		// TODO: lock
-		job.status = JobStatus::Running { pid: 0 };
+		let job_id = job.id.clone();
+		let sender_ = self.sender.clone();
+		let result: Result<ExitStatus, &'static str> = await!(
+			async move {
+				let sender = sender_;
+				// TODO: lock
+				job.status = JobStatus::Running { pid: 0 };
+				let allocation = &job.allocation.as_ref().unwrap();
 
-		let sender = self.sender.clone();
+				let child = std::process::Command::new(&job.spec.cmd[0])
+					.args(
+						job.spec.cmd[1..]
+							.iter()
+							.map(|x| strfmt::strfmt(x, &allocation.0).unwrap())
+							.collect::<Vec<String>>(),
+					)
+					.envs(
+						job.spec
+							.envs
+							.iter()
+							.map(|(k, v)| {
+								(
+									strfmt::strfmt(k, &allocation.0).unwrap(),
+									strfmt::strfmt(v, &allocation.0).unwrap(),
+								)
+							})
+							.collect::<Vec<_>>(),
+					)
+					.current_dir(job.spec.cwd)
+					.stdin(Stdio::null())
+					.stdout(Stdio::null())
+					.stderr(Stdio::null())
+					.spawn_async()
+					.map_err(|_err| "fail to spawn child")?;
 
-		let allocation = &job.allocation.as_ref().unwrap();
+				sender
+					.unbounded_send(Message::JobUpdate {
+						job_id: job.id.clone(),
+						status: JobStatus::Running { pid: child.id() },
+					})
+					.map_err(|_err| "[Worker] error sending JobUpdate msg")?;
 
-		let status: Result<ExitStatus, String> = try {
-			let child = std::process::Command::new(&job.spec.cmd[0])
-				.args(
-					job.spec.cmd[1..]
-						.iter()
-						.map(|x| strfmt::strfmt(x, &allocation.0).unwrap())
-						.collect::<Vec<String>>(),
-				)
-				.envs(
-					job.spec
-						.envs
-						.iter()
-						.map(|(k, v)| {
-							(
-								strfmt::strfmt(k, &allocation.0).unwrap(),
-								strfmt::strfmt(v, &allocation.0).unwrap(),
-							)
-						})
-						.collect::<Vec<_>>(),
-				)
-				.current_dir(job.spec.cwd)
-				.stdin(Stdio::null())
-				.stdout(Stdio::null())
-				.stderr(Stdio::null())
-				.spawn_async()
-				.map_err(|_err| "fail to spawn child")?;
+				// child is 01 future
+				let status = await!(child
+					.map_err(|err| format!("cannot wait child process: {}", err))
+					.compat())
+				.unwrap();
 
-			sender
-				.unbounded_send(Message::JobUpdate {
-					job_id: job.id.clone(),
-					status: JobStatus::Running { pid: child.id() },
-				})
-				.map_err(|_err| "[Worker] error sending JobUpdate msg")?;
+				Ok(status)
+			}
+		);
 
-			// child is 01 future
-			let status = await!(child
-				.map_err(|err| format!("cannot wait child process: {}", err))
-				.compat())
-			.unwrap();
-			status
-		};
-
-		let status = match status {
+		let status = match result {
 			Ok(status) => {
 				if status.success() {
 					Ok(())
@@ -225,16 +247,15 @@ impl WorkerInner {
 			}
 			Err(err) => Err(format!("spawn error: {}", err)),
 		};
-		sender
+		self.sender
 			.unbounded_send(Message::JobUpdate {
-				job_id: job.id,
+				job_id,
 				status: JobStatus::Finished {
 					exit_status: status,
 					duration: 0,
 				},
 			})
 			.unwrap();
-		Ok(())
 	}
 }
 
@@ -248,16 +269,22 @@ struct WorkerRPCServerImpl {
 impl Service for WorkerRPCServerImpl {
 	type OnNewJobFut = Ready<()>;
 	fn on_new_job(self, _: context::Context) -> Self::OnNewJobFut {
-		println!(">>>>>>>>>>>>>     on new job");
+		let log = crate::logger::get_logger();
+		info!(log, "[Worker] on_new_job()");
 		self.worker
 			.sender
 			.unbounded_send(Message::TrySchedule)
 			.unwrap();
+		// possible that msg is processed before the end of this call
+		// broker calls on_new_job() -> worker schedule msg -> worker calls job_request
+		// concurrent call on_new_job() -> worker
 		futures::future::ready(())
 	}
 
 	type StatusFut = Ready<String>;
 	fn status(self, _: context::Context) -> Self::StatusFut {
-		futures::future::ready("asdf".to_string())
+		let log = crate::logger::get_logger();
+		info!(log, "[Worker] status()");
+		futures::future::ready("[dummy status]".to_string())
 	}
 }

@@ -1,7 +1,6 @@
-#![recursion_limit="128"]
-
+#![recursion_limit = "128"]
 #![feature(await_macro, async_await, futures_api)]
-#![feature(try_blocks)]
+#![feature(try_blocks, arbitrary_self_types)]
 #![feature(label_break_value)]
 #![feature(associated_type_defaults, proc_macro_hygiene)]
 #![allow(unused_imports, dead_code)]
@@ -29,9 +28,9 @@ mod objects;
 mod broker;
 mod compat;
 mod daemon;
+mod oneshot;
 mod rpc;
 mod worker;
-mod oneshot;
 
 use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
 
@@ -103,6 +102,13 @@ fn main() {
 				cmd.arg("--master").arg(master);
 			}
 
+			// validate
+			if let Some(resources) = matches.value_of("resources") {
+				let _: WorkerCapacity =
+					json5::from_str(resources).expect("fail to parse arg resources");
+				cmd.arg("--resources").arg(resources);
+			}
+
 			cmd.spawn().expect("Daemon process failed to start.");
 		}
 		"stop" => {
@@ -138,8 +144,10 @@ fn main() {
 					.collect()
 				})
 				.unwrap_or_default();
-			let req: ResourceRequirement =
-				matches.value_of("req").map(|j| json5::from_str(j).expect("wrong json5 format")).unwrap_or_default();
+			let req: ResourceRequirement = matches
+				.value_of("require")
+				.map(|j| json5::from_str(j).expect("wrong json5 format"))
+				.unwrap_or_default();
 
 			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
 				std::fs::canonicalize(path)
@@ -273,8 +281,8 @@ fn main() {
 			let _ = std::fs::remove_file("/tmp/grass.sock");
 
 			let resources: WorkerCapacity = matches
-				.value_of("json")
-				.map(|j| json5::from_str(j).unwrap())
+				.value_of("resources")
+				.map(|j| WorkerCapacity::from_json_str(&j).expect("invalid json5"))
 				.unwrap_or_default();
 
 			let broker_config = Some(broker::BrokerConfig {

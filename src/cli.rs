@@ -29,11 +29,20 @@ pub fn build_cli() -> App<'static, 'static> {
 						.takes_value(true)
 						.help("ip:port of master server"),
 				)
-				.arg(Arg::with_name("json").long("json").takes_value(true)),
+				.arg(
+					Arg::with_name("resources")
+						.long("resources")
+						.takes_value(true),
+				),
 		)
 		.subcommand(
 			SubCommand::with_name("daemon")
-				.arg(Arg::with_name("master").long("master").takes_value(true)),
+				.arg(Arg::with_name("master").long("master").takes_value(true))
+				.arg(
+					Arg::with_name("resources")
+						.long("resources")
+						.takes_value(true),
+				),
 		)
 		.subcommand(
 			SubCommand::with_name("stop")
@@ -47,10 +56,10 @@ pub fn build_cli() -> App<'static, 'static> {
 			// method2. AllowExternalSubcommand: cannot use --
 			SubCommand::with_name("enqueue")
 				.about("Enqueue new job")
-				.arg(Arg::with_name("name").index(1).required(true))
+				// .arg(Arg::with_name("name").index(1).required(true))
 				.arg(Arg::with_name("cwd").long("cwd").takes_value(true))
 				.arg(Arg::with_name("sync").long("sync"))
-				.arg(Arg::with_name("req").long("req").takes_value(true))
+				.arg(Arg::with_name("require").long("require").takes_value(true))
 				.arg(Arg::with_name("cmd").multiple(true).required(true))
 				.arg(
 					Arg::with_name("env")
@@ -66,7 +75,7 @@ pub fn build_cli() -> App<'static, 'static> {
 			// 3) show --queue q1
 			SubCommand::with_name("show")
 				.about("Show the job status")
-				.arg(Arg::with_name("queue").long("queue").takes_value(true))
+				// .arg(Arg::with_name("queue").long("queue").takes_value(true))
 				.arg(Arg::with_name("json").long("json"))
 				.arg(Arg::with_name("table").long("table"))
 				.group(ArgGroup::with_name("print-style").args(&["json", "table"])),
@@ -75,6 +84,4 @@ pub fn build_cli() -> App<'static, 'static> {
 			SubCommand::with_name("dashboard")
 				.arg(Arg::with_name("bind").long("bind").takes_value(true)),
 		)
-		.subcommand(SubCommand::with_name("broker"))
-		.subcommand(SubCommand::with_name("worker"))
 }

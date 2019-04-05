@@ -43,6 +43,7 @@ impl BrokerConfig {
 }
 
 tarpc::service! {
+	rpc ping();
 	rpc job_update(job_id: String, status: JobStatus);
 	rpc job_request(capacity: WorkerCapacity) -> Option<Job>;
 	rpc job_enqueue(spec: JobSpecification);
@@ -114,6 +115,8 @@ impl Broker {
 								.unwrap();
 
 								await!(inner.workers.lock()).insert(session_id.clone(), client);
+
+								info!(log, "[Broker] New worker client registered";"id"=>&session_id);
 							}
 							await!(inner.stop_flag.clone()).unwrap();
 						},
@@ -123,13 +126,13 @@ impl Broker {
 					let mut stop_flag = inner.stop_flag.clone().fuse();
 					futures::select! {
 						_ = session_serve => {
-							info!(log, "[Broker] Session closed"; "reason" => "TCP connection closed by peer");
+							info!(log, "[Broker] Session closed"; "reason" => "rpc server TCP connection closed by peer","id"=>&session_id);
 						},
 						_ = fut2 => {
-							info!(log, "[Broker] Session closed"; "reason" => "TCP connection closed by peer");
+							info!(log, "[Broker] Session closed"; "reason" => "worker client TCP connection closed by peer","id"=>&session_id);
 						},
 						_ = stop_flag => {
-							info!(log, "[Broker] Session closed"; "reason" => "STOP signal");
+							info!(log, "[Broker] Session closed"; "reason" => "STOP signal","id"=>&session_id);
 						},
 					};
 					// clean-up
@@ -169,6 +172,11 @@ struct BrokerRPCServerImpl {
 }
 
 impl Service for BrokerRPCServerImpl {
+	type PingFut = Ready<()>;
+	fn ping(self, _: context::Context) -> Self::PingFut {
+		futures::future::ready(())
+	}
+
 	/// Broker <-> Worker
 	type JobUpdateFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn job_update(
@@ -177,6 +185,8 @@ impl Service for BrokerRPCServerImpl {
 		job_id: String,
 		status: JobStatus,
 	) -> Self::JobUpdateFut {
+		let log = crate::logger::get_logger();
+		info!(log, "[Broker] job_update()");
 		Box::pin(
 			async move {
 				await!(self.broker.jobs.lock())
@@ -189,6 +199,8 @@ impl Service for BrokerRPCServerImpl {
 
 	type JobRequestFut = std::pin::Pin<Box<dyn Future<Output = Option<Job>> + Send>>;
 	fn job_request(self, _: context::Context, capacity: WorkerCapacity) -> Self::JobRequestFut {
+		let log = crate::logger::get_logger();
+		info!(log, "[Broker] job_request()"; "capacity"=>?capacity);
 		Box::pin(
 			async move {
 				let mut jobs = await!(self.broker.jobs.lock());
@@ -221,7 +233,7 @@ impl Service for BrokerRPCServerImpl {
 	type JobEnqueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn job_enqueue(self, _: context::Context, spec: JobSpecification) -> Self::JobEnqueueFut {
 		let log = crate::logger::get_logger();
-		info!(log, "[Broker] enqueue() called"; "spec"=>?spec);
+		info!(log, "[Broker] enqueue()"; "spec"=>?spec);
 		Box::pin(
 			async move {
 				let job = spec.build();

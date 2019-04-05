@@ -19,7 +19,7 @@ use futures::channel::mpsc::UnboundedSender;
 /// 	1: 256
 /// 	2: 128
 /// }
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ResourceTypeCapacity(pub HashMap<String, f64>);
 
 /// ResourceRequirement = {
@@ -122,73 +122,70 @@ impl Drop for JobRunningGuard {
 	}
 }
 
-impl<'de> Deserialize<'de> for ResourceTypeCapacity {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		let value: Value = Deserialize::deserialize(deserializer)?;
-		match value {
-			Value::Number(n) => {
-				if let Some(n) = n.as_u64() {
-					let mut m = HashMap::new();
-					for i in 0..n {
-						m.insert(i.to_string(), 1.0);
-					}
-					Ok(ResourceTypeCapacity(m))
-				} else {
-					Err(de::Error::custom("It should be a single integer"))
-				}
-			}
-			Value::String(s) => {
-				if let Ok(n) = &s.parse::<u32>() {
-					let mut m = HashMap::new();
-					for i in 0..*n {
-						m.insert(i.to_string(), 1.0);
-					}
-					Ok(ResourceTypeCapacity(m))
-				} else {
-					Err(de::Error::custom("It should be a single integer"))
-				}
-			}
-			Value::Array(arr) => {
-				let mut m = HashMap::new();
-				// check if all items are numbers
-				for (i, item) in arr.iter().enumerate() {
-					if let Some(f) = item.as_f64() {
-						m.insert(i.to_string(), f);
+impl WorkerCapacity {
+	pub fn from_json_str(s: &str) -> Result<WorkerCapacity, &'static str> {
+		let value: serde_json::Value = json5::from_str(s).map_err(|_| "invalid json5")?;
+		let value = value.as_object().expect("root json is not an object");
+
+		let mut cap = HashMap::new();
+
+		for (res_type, value) in value.iter() {
+			let parsed = match value {
+				Value::Number(n) => {
+					if let Some(n) = n.as_u64() {
+						let mut m = HashMap::new();
+						for i in 0..n {
+							m.insert(i.to_string(), 1.0);
+						}
+						ResourceTypeCapacity(m)
 					} else {
-						return Err(de::Error::custom("List has a non-number"));
+						Err("A number is not u64")?
 					}
 				}
-				Ok(ResourceTypeCapacity(m))
-			}
-			Value::Object(obj) => {
-				let mut m = HashMap::new();
-				for (k, value) in obj.iter() {
-					let v: f64 = if let Some(num) = value.as_f64() {
-						num
-					} else if let Some(s) = value.as_str() {
-						s.parse::<f64>().map_err(|_| {
-							de::Error::custom(format!(
-								"Map value is not a number: {}",
-								&value.to_string()
-							))
-						})?
+				Value::String(s) => {
+					if let Ok(n) = &s.parse::<u32>() {
+						let mut m = HashMap::new();
+						for i in 0..*n {
+							m.insert(i.to_string(), 1.0);
+						}
+						ResourceTypeCapacity(m)
 					} else {
-						Err(de::Error::custom(format!(
-							"Map value is not a number: {}",
-							&value.to_string()
-						)))?
-					};
-					m.insert(k.to_string(), v);
+						Err("A string is not u32")?
+					}
 				}
-				Ok(ResourceTypeCapacity(m))
-			}
-			_ => Err(de::Error::custom(
-				"Unsupported resource capacity. It should be int, list, or dictionary",
-			)),
+				Value::Array(arr) => {
+					let mut m = HashMap::new();
+					// check if all items are numbers
+					for (i, item) in arr.iter().enumerate() {
+						if let Some(f) = item.as_f64() {
+							m.insert(i.to_string(), f);
+						} else {
+							return Err("List has a non-number");
+						}
+					}
+					ResourceTypeCapacity(m)
+				}
+				Value::Object(obj) => {
+					let mut m = HashMap::new();
+					for (k, value) in obj.iter() {
+						let v: f64 = if let Some(num) = value.as_f64() {
+							num
+						} else if let Some(s) = value.as_str() {
+							s.parse::<f64>()
+								.map_err(|_| "Map value is not a number: {}")?
+						} else {
+							Err("Map value is not a number: {}")?
+						};
+						m.insert(k.to_string(), v);
+					}
+					ResourceTypeCapacity(m)
+				}
+				_ => Err("Unsupported resource capacity. It should be int, list, or dictionary")?,
+			};
+
+			cap.insert(res_type.to_string(), parsed);
 		}
+		Ok(WorkerCapacity(cap))
 	}
 }
 
