@@ -1,12 +1,17 @@
 # Grass
 
+
+<p>
+  <a href="https://travis-ci.org/elbaro/grass">
+    <img alt="Build Status" src="https://travis-ci.org/elbaro/grass.svg?branch=master">
+  </a>
+</p>
+
+[Wiki](https://github.com/elbaro/grass/wiki) | [Releases](https://github.com/elbaro/grass/releases) | [Changelog](https://github.com/elbaro/grass/blob/master/CHANGELOG.md)
+
 Grass is a non-distributed version of slurm.
 
-- [Changelog](https://github.com/elbaro/grass/blob/master/CHANGELOG.md)
-- [Wiki](https://github.com/elbaro/grass/wiki)
-- [Releases](https://github.com/elbaro/grass/releases)
-
-Supports Unix.
+Supports and tested on Unix.
 
 ## Install
 requires Rust nightly.
