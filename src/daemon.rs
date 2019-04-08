@@ -1,5 +1,11 @@
 use crate::broker::{Broker, BrokerConfig};
-use crate::worker::{Worker, WorkerConfig};
+use crate::worker::{Worker, WorkerConfig, QueueConfig};
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::pin::Pin;
+
+
 use slog::{error, info};
 
 use futures::compat::Compat;
@@ -11,15 +17,17 @@ use futures01::Stream as Stream01;
 
 use tokio_async_await::compat::backward;
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+
 
 use crate::oneshot::StreamExt as OneshotStreamExt;
 
-use crossbeam::atomic::AtomicCell;
+
+use crate::objects::QueueCapacity;
 
 tarpc::service! {
 	rpc stop();
+	rpc create_queue(config: QueueConfig);
+	rpc delete_queue(name:String);
 }
 
 pub struct Daemon {
@@ -142,6 +150,24 @@ impl Service for DaemonRPCServerImpl {
 		info!(log, "[Daemon] stop()");
 		self.daemon_inner.stop();
 		future::ready(())
+	}
+
+	type CreateQueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+	fn create_queue(self, _: context::Context, config: QueueConfig) -> Self::CreateQueueFut {
+		Box::pin(async move {
+			if let Some(worker) = self.daemon_inner.worker.as_ref() {
+				await!(worker.create_queue(config));
+			}
+		})
+	}
+
+	type DeleteQueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+	fn delete_queue(self, _: context::Context, name: String) -> Self::DeleteQueueFut {
+		Box::pin(async move {
+			if let Some(worker) = self.daemon_inner.worker.as_ref() {
+				await!(worker.delete_queue(name));
+			}
+		})
 	}
 }
 

@@ -32,7 +32,8 @@ mod oneshot;
 mod rpc;
 mod worker;
 
-use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
+use objects::{Job, JobSpecification, JobStatus, QueueCapacity, ResourceRequirement};
+use worker::QueueConfig;
 
 use app_dirs::{get_app_root, AppInfo};
 const APP_INFO: AppInfo = AppInfo {
@@ -106,7 +107,7 @@ fn main() {
 
 			// validate
 			if let Some(resources) = matches.value_of("resources") {
-				let _: WorkerCapacity =
+				let _: QueueCapacity =
 					json5::from_str(resources).expect("fail to parse arg resources");
 				cmd.arg("--resources").arg(resources);
 			}
@@ -127,6 +128,7 @@ fn main() {
 		}
 		"enqueue" => 'e: {
 			// grass enqueue --cwd . --req "{gpu:1}" -- python train.py ..
+			let q_name: String = matches.value_of("q_name").unwrap().to_string();
 			let cmd: Vec<String> = matches
 				.values_of("cmd")
 				.unwrap()
@@ -151,15 +153,6 @@ fn main() {
 				.map(|j| json5::from_str(j).expect("wrong json5 format"))
 				.unwrap_or_default();
 
-			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
-				std::fs::canonicalize(path)
-			} else {
-				std::fs::canonicalize(
-					std::env::current_dir().expect("cannot read current working direrctory"),
-				)
-			}
-			.unwrap();
-
 			let broker_addr: SocketAddr = matches
 				.value_of("broker")
 				.unwrap_or("127.0.0.1:7500")
@@ -167,8 +160,8 @@ fn main() {
 				.expect("broker address should be ip:port");
 
 			let job_spec = JobSpecification {
+				q_name,
 				cmd,
-				cwd,
 				envs,
 				require: req,
 			};
@@ -193,6 +186,12 @@ fn main() {
 			// worker: none
 			// worker: 2 brokers, 127.0.0.1:11, remote.com:111
 
+			let broker_addr: SocketAddr = matches
+				.value_of("broker")
+				.unwrap_or("127.0.0.1:7500")
+				.parse()
+				.expect("broker address should be ip:port");
+
 			compat::tokio_run(
 				async move {
 					let mut t = term::stdout().unwrap();
@@ -206,8 +205,6 @@ fn main() {
 					}
 
 					// query broker
-
-					let broker_addr = "127.0.0.1:7500".parse().unwrap();
 					let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
 					let info = await!(client.info(context::current())).unwrap();
 					t.fg(term::color::WHITE).unwrap();
@@ -216,7 +213,15 @@ fn main() {
 					t.reset().unwrap();
 
 					let mut table = Table::new();
-					table.add_row(row!["job_id", "status", "command", "allocation", "result"]);
+					table.add_row(row![
+						"created",
+						"queue",
+						"job id",
+						"status",
+						"command",
+						"allocation",
+						"result"
+					]);
 
 					for job in &info.jobs {
 						let cmd: String = job.spec.cmd.join(" ");
@@ -257,6 +262,13 @@ fn main() {
 						let allocation = textwrap::fill(&allocation, 20);
 
 						table.add_row(Row::new(vec![
+							Cell::new(
+								&job.created_at
+									.with_timezone(&chrono::Local)
+									.format("%Y-%m-%d %P %l:%M:%S")
+									.to_string(),
+							),
+							Cell::new(&job.spec.q_name),
 							Cell::new(&job.id[..8]),
 							status_cell,
 							Cell::new(&cmd),
@@ -298,17 +310,12 @@ fn main() {
 			let worker_config = if matches.is_present("no-worker") {
 				None
 			} else {
-				let resources: WorkerCapacity = matches
-					.value_of("resources")
-					.map(|j| WorkerCapacity::from_json_str(&j).expect("invalid json5"))
-					.unwrap_or_default();
 				Some(worker::WorkerConfig {
 					broker_addr: matches
 						.value_of("connect")
 						.unwrap_or("127.0.0.1:7500")
 						.parse()
 						.expect("fail to parse --connect address"),
-					resources,
 				})
 			};
 
@@ -320,6 +327,69 @@ fn main() {
 
 			lock.release().expect("fail to release lock");
 			info!(log, "Quit.");
+		}
+		"create-queue" => {
+			let cwd: PathBuf = if let Some(path) = matches.value_of("cwd") {
+				std::fs::canonicalize(path)
+			} else {
+				std::fs::canonicalize(
+					std::env::current_dir().expect("cannot read current working direrctory"),
+				)
+			}
+			.unwrap();
+
+			let cmd: Vec<String> = matches
+				.values_of("cmd")
+				.unwrap()
+				.map(str::to_string)
+				.collect();
+			let envs: Vec<(String, String)> = matches
+				.values_of("env")
+				.map(|x| {
+					x.map(|expr| {
+						// input: A=B
+						// output: (A,B)
+						let mut s = expr.splitn(2, '=');
+						let a = s.next().expect("invalid env");
+						let b = s.next().expect("invalid env");
+						(a.to_string(), b.to_string())
+					})
+					.collect()
+				})
+				.unwrap_or_default();
+
+			let capacity: QueueCapacity = matches
+				.value_of("capacity")
+				.map(|j| QueueCapacity::from_json_str(&j).expect("invalid json5"))
+				.unwrap_or_default();
+
+			let config = QueueConfig {
+				name: matches.value_of("name").unwrap().to_string(),
+				cwd,
+				cmd,
+				envs,
+				capacity,
+			};
+
+			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
+			compat::tokio_run(
+				async move {
+					let mut client = await!(daemon::new_daemon_client()).unwrap();
+					await!(client.create_queue(context::current(), config)).unwrap();
+					info!(log, "Done");
+				},
+			);
+		}
+		"delete-queue" => {
+			let name = matches.value_of("name").unwrap().to_string();
+			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
+			compat::tokio_run(
+				async move {
+					let mut client = await!(daemon::new_daemon_client()).unwrap();
+					await!(client.delete_queue(context::current(), name)).unwrap();
+					info!(log, "Done");
+				},
+			);
 		}
 		"dashboard" => unimplemented!(),
 		_ => unreachable!(),

@@ -1,4 +1,4 @@
-use crate::objects::{Job, JobSpecification, JobStatus, WorkerCapacity, WorkerInfo};
+use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity, WorkerInfo};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -45,7 +45,7 @@ impl BrokerConfig {
 tarpc::service! {
 	rpc ping();
 	rpc job_update(job_id: String, status: JobStatus);
-	rpc job_request(capacity: WorkerCapacity) -> Option<Job>;
+	rpc job_request(q_name: String, capacity: QueueCapacity) -> Option<Job>;
 	rpc job_enqueue(spec: JobSpecification);
 	// rpc job_enqueue(spec: String);
 	rpc info() -> BrokerInfo;
@@ -198,9 +198,9 @@ impl Service for BrokerRPCServerImpl {
 	}
 
 	type JobRequestFut = std::pin::Pin<Box<dyn Future<Output = Option<Job>> + Send>>;
-	fn job_request(self, _: context::Context, capacity: WorkerCapacity) -> Self::JobRequestFut {
+	fn job_request(self, _: context::Context, q_name: String, capacity: QueueCapacity) -> Self::JobRequestFut {
 		let log = slog_scope::logger();
-		info!(log, "[Broker] job_request()"; "capacity"=>?capacity);
+		info!(log, "[Broker] job_request()"; "q"=>&q_name, "capacity"=>?capacity);
 		Box::pin(
 			async move {
 				let mut jobs = await!(self.broker.jobs.lock());
@@ -208,8 +208,10 @@ impl Service for BrokerRPCServerImpl {
 
 				match 'hunt: {
 					for id in &*pending_job_ids {
-						if let Some(allocation) = capacity.can_run_job(&jobs[id].spec.require) {
-							break 'hunt Some((id.clone(), allocation));
+						if &jobs[id].spec.q_name == &q_name {
+							if let Some(allocation) = capacity.can_run_job(&jobs[id].spec.require) {
+								break 'hunt Some((id.clone(), allocation));
+							}
 						}
 					}
 					None

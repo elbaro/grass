@@ -30,12 +30,12 @@ pub struct ResourceTypeCapacity(pub HashMap<String, f64>);
 pub struct ResourceRequirement(pub HashMap<String, f64>);
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct WorkerCapacity(pub HashMap<String, ResourceTypeCapacity>);
+pub struct QueueCapacity(pub HashMap<String, ResourceTypeCapacity>);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Allocation(pub HashMap<String, String>);
 
-impl WorkerCapacity {
+impl QueueCapacity {
 	pub fn can_run_job(&self, req: &ResourceRequirement) -> Option<Allocation> {
 		let mut allocation = Allocation(HashMap::<String, String>::new());
 		let chk = req.0.iter().all(|(res_type, amount)| {
@@ -95,11 +95,11 @@ impl WorkerCapacity {
 use std::sync::RwLock;
 struct JobRunningGuard {
 	job: Job,
-	worker_capacity: RwLock<WorkerCapacity>,
+	worker_capacity: RwLock<QueueCapacity>,
 }
 
 impl JobRunningGuard {
-	fn new(job: Job, worker_capacity: RwLock<WorkerCapacity>) -> JobRunningGuard {
+	fn new(job: Job, worker_capacity: RwLock<QueueCapacity>) -> JobRunningGuard {
 		{
 			let mut cap = worker_capacity.write().unwrap();
 			cap.consume(&job);
@@ -122,8 +122,8 @@ impl Drop for JobRunningGuard {
 	}
 }
 
-impl WorkerCapacity {
-	pub fn from_json_str(s: &str) -> Result<WorkerCapacity, &'static str> {
+impl QueueCapacity {
+	pub fn from_json_str(s: &str) -> Result<QueueCapacity, &'static str> {
 		let value: serde_json::Value = json5::from_str(s).map_err(|_| "invalid json5")?;
 		let value = value.as_object().expect("root json is not an object");
 
@@ -185,7 +185,7 @@ impl WorkerCapacity {
 
 			cap.insert(res_type.to_string(), parsed);
 		}
-		Ok(WorkerCapacity(cap))
+		Ok(QueueCapacity(cap))
 	}
 }
 
@@ -218,6 +218,7 @@ impl WorkerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
 	pub id: String,
+	pub created_at: chrono::DateTime<chrono::Utc>,
 	pub spec: JobSpecification,
 	pub status: JobStatus,
 	pub allocation: Option<Allocation>,
@@ -225,7 +226,7 @@ pub struct Job {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobSpecification {
-	pub cwd: PathBuf,
+	pub q_name: String,
 	pub cmd: Vec<String>,
 	pub envs: Vec<(String, String)>,
 	pub require: ResourceRequirement,
@@ -236,6 +237,7 @@ impl JobSpecification {
 		let id = uuid::Uuid::new_v4().to_hyphenated().to_string();
 		Job {
 			id,
+			created_at: chrono::Utc::now(),
 			spec: self,
 			status: JobStatus::Pending,
 			allocation: Default::default(),
