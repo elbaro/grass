@@ -11,7 +11,7 @@ clap::arg_enum! {
 
 pub fn build_cli() -> App<'static, 'static> {
 	App::new("grass")
-		.version("prealpha")
+		.version(clap::crate_version!())
 		.author("github.com/elbaro/grass")
 		.about("GRES job scheduler")
 		.setting(AppSettings::SubcommandRequiredElseHelp)
