@@ -1,11 +1,6 @@
 # Grass
 
-
-<p>
-  <a href="https://travis-ci.org/elbaro/grass">
-    <img alt="Build Status" src="https://travis-ci.org/elbaro/grass.svg?branch=master">
-  </a>
-</p>
+[![Build Status](https://travis-ci.org/elbaro/grass.svg)](https://travis-ci.org/elbaro/grass) [![Code Coverage](https://codecov.io/gh/elbaro/grass/branch/master/graph/badge.svg)](https://codecov.io/gh/TechnionYP5777/project-name)
 
 [Wiki](https://github.com/elbaro/grass/wiki) | [Releases](https://github.com/elbaro/grass/releases) | [Changelog](https://github.com/elbaro/grass/blob/master/CHANGELOG.md)
 

@@ -4,6 +4,10 @@ version = "0.0.3"
 authors = ["elbaro <elbaro@users.noreply.github.com>"]
 edition = "2018"
 
+[badges]
+travis-ci = { repository = "elbaro/grass", branch = "master" }
+codecov = { repository = "elbaro/grass", branch = "master", service = "github" }
+
 [dependencies]
 clap = "2.32.0"
 strfmt = "0.1.6"
