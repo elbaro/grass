@@ -9,9 +9,9 @@ addons:
 matrix:
   include:
     - env: TARGET=x86_64-unknown-linux-gpu
-      rust: nightly
+      rust: nightly-2019-03-20
     - env: osx
-      rust: nightly
+      rust: nightly-2019-03-20
 
 before_install:
   - set -e
@@ -29,13 +29,18 @@ after_script:
   set +e
 
 cache: cargo
-before_cache:
-  - chmod -R a+r $HOME/.cargo
-  - RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
+before_cache: |
+  chmod -R a+r $HOME/.cargo
+  if [[ "$TRAVIS_OS_NAME" == linux ]]; then
+    RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
+  fi
+
 
 after_success:
-  cargo tarpaulin --out Xml
-  bash <(curl -s https://codecov.io/bash)
+  if [[ "$TRAVIS_OS_NAME" == linux ]]; then
+    cargo tarpaulin --out Xml
+    bash <(curl -s https://codecov.io/bash)
+  fi
 
 notifications:
     email:
