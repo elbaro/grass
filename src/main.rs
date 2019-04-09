@@ -58,7 +58,7 @@ impl AppConfig {
 				return Ok(AppConfig::default());
 			}
 		};
-		toml::from_str::<AppConfig>(&string).map_err(|e| e.into())
+		toml::from_str::<AppConfig>(&string).map_err(std::convert::Into::into)
 	}
 	fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
 		let path = get_app_root(app_dirs::AppDataType::UserConfig, &APP_INFO)?.join("grass.toml");
@@ -85,7 +85,7 @@ fn main() {
 	let _log_guard = slog_scope::set_global_logger(log);
 	let log = slog_scope::logger();
 
-	match sub.as_ref() {
+	match sub {
 		"start" => {
 			// default === broker(bind:localhost), worker(connect:lcoalhost)
 			//             --no-broker  --bind
@@ -254,7 +254,7 @@ fn main() {
 							.allocation
 							.as_ref()
 							.map(|x| serde_json::to_string(&x).unwrap())
-							.unwrap_or("".to_string());
+							.unwrap_or_default();
 
 						// wrap cmd and result
 						let cmd = textwrap::fill(&cmd, 30);
@@ -277,7 +277,7 @@ fn main() {
 						]));
 					}
 
-					if table.len() == 0 {
+					if table.is_empty() {
 						println!("no jobs");
 					}
 					table.printstd();

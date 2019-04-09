@@ -198,7 +198,12 @@ impl Service for BrokerRPCServerImpl {
 	}
 
 	type JobRequestFut = std::pin::Pin<Box<dyn Future<Output = Option<Job>> + Send>>;
-	fn job_request(self, _: context::Context, q_name: String, capacity: QueueCapacity) -> Self::JobRequestFut {
+	fn job_request(
+		self,
+		_: context::Context,
+		q_name: String,
+		capacity: QueueCapacity,
+	) -> Self::JobRequestFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] job_request()"; "q"=>&q_name, "capacity"=>?capacity);
 		Box::pin(
@@ -208,7 +213,7 @@ impl Service for BrokerRPCServerImpl {
 
 				match 'hunt: {
 					for id in &*pending_job_ids {
-						if &jobs[id].spec.q_name == &q_name {
+						if jobs[id].spec.q_name == q_name {
 							if let Some(allocation) = capacity.can_run_job(&jobs[id].spec.require) {
 								break 'hunt Some((id.clone(), allocation));
 							}
@@ -264,7 +269,7 @@ impl Service for BrokerRPCServerImpl {
 				let jobs = await!(self.broker.jobs.lock());
 
 				BrokerInfo {
-					bind_addr: self.broker.bind_addr.clone(),
+					bind_addr: self.broker.bind_addr,
 					jobs: jobs.values().cloned().collect(),
 					workers: Default::default(),
 				}

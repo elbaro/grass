@@ -5,7 +5,7 @@ pub fn create_logger(path: Option<&str>) -> Logger {
 	let decorator = slog_term::TermDecorator::new().build();
 	let drain_term = slog_term::CompactFormat::new(decorator).build().fuse();
 
-	let logger = if let Some(path) = path {
+	if let Some(path) = path {
 		// "/tmp/grass.log"
 		let file = std::fs::File::create(path).unwrap();
 		let decorator = slog_term::PlainDecorator::new(file);
@@ -18,7 +18,5 @@ pub fn create_logger(path: Option<&str>) -> Logger {
 	} else {
 		let drain = slog_async::Async::new(drain_term).build().fuse();
 		slog::Logger::root(drain, o!())
-	};
-
-	return logger;
+	}
 }

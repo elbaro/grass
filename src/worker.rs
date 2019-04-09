@@ -234,7 +234,7 @@ impl QueueConfig {
 			cmd: self.cmd,
 			envs: self.envs,
 			capacity: self.capacity,
-			available: available,
+			available,
 			jobs: Default::default(),
 		}
 	}

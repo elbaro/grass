@@ -29,7 +29,7 @@ pub fn new<T: Clone>() -> (OneshotSender<T>, OneshotFlag<T>) {
 		inner: Arc::new(Mutex::new(Some(s))),
 	};
 	let r = r.shared();
-	return (s, r);
+	(s, r)
 }
 
 #[derive(Clone, Debug)]
@@ -54,8 +54,7 @@ pub trait StreamExt: Stream {
 		}
 	}
 }
-impl<T:Stream> StreamExt for T {
-}
+impl<T: Stream> StreamExt for T {}
 
 impl<S: Stream, F: Future<Output = ()>> Stream for TakeUntil<S, F> {
 	type Item = S::Item;
