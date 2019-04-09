@@ -43,3 +43,6 @@ tokio-async-await = "0.1.6"
 yamux = "0.1.9"
 pin-utils = "0.1.0-alpha.4"
 slog-scope = "4.1.1"
+
+[dev-dependencies]
+timebomb = "0.1.2"

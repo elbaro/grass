@@ -71,13 +71,90 @@ impl<S: Stream, F: Future<Output = ()>> Stream for TakeUntil<S, F> {
 	}
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::{OneshotFlag, OneshotSender, new, StreamExt};
-//     use futures::{channel::mpsc, prelude::*, Poll};
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use futures::StreamExt as StdStreamExt;
 
-//     #[test]
-//     fn test_() {
+	#[test]
+	fn test_send_recv() {
+		timebomb::timeout_ms(
+			|| {
+				let (sender, flag) = new::<u32>();
+				sender.send(98124).unwrap();
+				crate::compat::tokio_run(
+					async {
+						assert!(await!(flag) == Ok(98124));
+					},
+				);
+			},
+			1000,
+		);
+	}
 
-// 	}
-// }
+	#[test]
+	fn test_clone_recv_send() {
+		timebomb::timeout_ms(
+			|| {
+				let (sender, flag) = new::<u32>();
+				let sender1 = sender.clone();
+				let sender2 = sender1.clone();
+				let flag1 = flag.clone();
+				let flag2 = flag1.clone();
+
+				crate::compat::tokio_run(
+					async move {
+						crate::compat::tokio_spawn(
+							async move {
+								assert!(await!(flag1) == Ok(1234));
+								assert!(await!(flag2) == Ok(1234));
+								assert!(await!(flag) == Ok(1234));
+							},
+						);
+						sender2.send(1234).unwrap();
+						assert!(sender1.send(4213).is_err());
+					},
+				);
+			},
+			1000,
+		);
+	}
+
+	#[test]
+	fn test_send_twice() {
+		timebomb::timeout_ms(
+			|| {
+				let (sender, flag) = new::<u32>();
+				sender.send(198124).unwrap();
+				crate::compat::tokio_run(
+					async move {
+						assert!(await!(flag) == Ok(198124));
+						assert!(sender.send(2193).is_err());
+					},
+				);
+			},
+			1000,
+		);
+	}
+
+	#[test]
+	fn test_take_until() {
+		timebomb::timeout_ms(
+			|| {
+				let (sender, flag) = new::<()>();
+
+				crate::compat::tokio_run(
+					async move {
+						let vec = vec![6, 7, 8, 9, 10];
+						let mut stream = futures::stream::iter(vec.iter()).take_until(flag.map(|_| ()));
+						assert_eq!(await!(stream.next()), Some(&6));
+						assert_eq!(await!(stream.next()), Some(&7));
+						sender.send(()).unwrap();
+						assert_eq!(await!(stream.next()), None);
+					},
+				);
+			},
+			1000,
+		);
+	}
+}
