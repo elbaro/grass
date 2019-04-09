@@ -1,6 +1,6 @@
 # Grass
 
-[![Build Status](https://travis-ci.org/elbaro/grass.svg)](https://travis-ci.org/elbaro/grass) [![Code Coverage](https://codecov.io/gh/elbaro/grass/branch/master/graph/badge.svg)](https://codecov.io/gh/TechnionYP5777/project-name)
+[![Build Status](https://travis-ci.org/elbaro/grass.svg)](https://travis-ci.org/elbaro/grass) [![Code Coverage](https://codecov.io/gh/elbaro/grass/branch/master/graph/badge.svg)](https://codecov.io/gh/elbaro/grass)
 
 [Wiki](https://github.com/elbaro/grass/wiki) | [Releases](https://github.com/elbaro/grass/releases) | [Changelog](https://github.com/elbaro/grass/blob/master/CHANGELOG.md)
 
@@ -16,10 +16,11 @@ cargo install --git https://github.com/elbaro/grass
 
 ## Example - Local setup
 ```
-grass daemon --resources "{gpu:4,cpu:16}"
-```
-```
-grass enqueue --require "{gpu:1}" --env "CUDA_VISIBLE_DEVICES={gpu}" python train.py
+grass daemon
+grass create-queue job1 --capacity "{gpu:4,cpu:16}" main.py arg1
+grass enqueue --require "{gpu:1}" --env "CUDA_VISIBLE_DEVICES={gpu}" job1 arg2 arg3
+grass enqueue --require "{gpu:0.5}" --env "CUDA_VISIBLE_DEVICES={gpu}" job2 arg2 arg3
+grass enqueue  python train.py
 ```
 
 grass supports json5.
@@ -43,22 +44,23 @@ grass daemon --bind 0.0.0.0:7500 --no-worker
 Worker
 ```
 grass daemon --no-broker --connect my.server.com:7500
+grass create-queue --capacity "{gpu:4}" cifar100 python train.py
+grass create-queue --capacity "{printer:1}" print lpr
 ```
 
 CLI (from anywhere)
 ```
-grass enqueue --broker my.server.com:7500 echo 123
-grass enqueue --broker my.server.com:7500 sleep 10
-grass show
+grass enqueue --broker 1.2.3.4:7500 --require "{printer:1}" print paper.pdf
+grass enqueue --broker 1.2.3.4:7500 --require "{gpu:1}" cifar100 --lr=0.01
+grass show --broker 1.2.3.4:7500
 ```
-
-A worker behind firewall works. It does not use additional TCP connectcion.
 
 ## TODO
 - [x] In-memory queue (not persistent)
 - [x] Going distributed without complex cluster setup
 - [x] Supports a worker behind firewall
-- [ ] Fractional resource requirement (gpu=0.2)
+- [x] Fractional resource requirement (gpu=0.2)
+- [ ] DNS resolve
 - [ ] Request / Allocate multiple devices (e.g. gpu:2.5)
 - [ ] Persistency with sqlite/postgres backends
 - [ ] Journaling with backends. Recover from failure.
