@@ -32,7 +32,7 @@ cache: cargo
 before_cache: |
   chmod -R a+r $HOME/.cargo
   if [[ "$TRAVIS_OS_NAME" == linux ]]; then
-    RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin
+    RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
   fi
 
 
