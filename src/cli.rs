@@ -105,6 +105,8 @@ pub fn build_cli() -> App<'static, 'static> {
 				.arg(Arg::with_name("connect").long("connect").takes_value(true))
 				.arg(Arg::with_name("no-worker").long("no-worker"))
 				.group(ArgGroup::with_name("broker").args(&["bind", "no-broker"]))
-				.group(ArgGroup::with_name("worker").args(&["connect", "no-worker"])),
+				.group(ArgGroup::with_name("worker").args(&["connect", "no-worker"]))
+				.arg(Arg::with_name("cert").long("cert").takes_value(true))
+				.arg(Arg::with_name("cert-pass").long("cert-pass").takes_value(true))
 		)
 }

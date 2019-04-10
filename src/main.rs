@@ -1,6 +1,6 @@
 #![recursion_limit = "128"]
 #![feature(await_macro, async_await, futures_api)]
-#![feature(try_blocks, arbitrary_self_types)]
+#![feature(try_blocks, arbitrary_self_types, type_ascription)]
 #![feature(label_break_value)]
 #![feature(associated_type_defaults, proc_macro_hygiene)]
 #![allow(unused_imports, dead_code)]
@@ -304,6 +304,8 @@ fn main() {
 						.unwrap_or("127.0.0.1:7500")
 						.parse()
 						.expect("fail to parse --bind address"),
+					cert: matches.value_of("cert").map(|s| s.into()),
+					cert_pass: matches.value_of("cert-pass").map(|s| s.into())
 				})
 			};
 

@@ -1,6 +1,7 @@
 use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity, WorkerInfo};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -13,9 +14,9 @@ use futures::{future::Ready, Future, FutureExt, Stream, StreamExt, TryFutureExt}
 use futures01::stream::Stream as Stream01;
 use futures01::Future as Future01;
 
+use failure::ResultExt;
 use tarpc::context;
 use tarpc::server::Handler;
-
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 
@@ -24,8 +25,12 @@ use slog::{error, info, warn};
 
 use serde::{Deserialize, Serialize};
 
+use indexmap::IndexMap;
+
 pub struct BrokerConfig {
 	pub bind_addr: SocketAddr,
+	pub cert: Option<PathBuf>,
+	pub cert_pass: Option<String>,
 }
 
 impl BrokerConfig {
@@ -38,6 +43,8 @@ impl BrokerConfig {
 				pending_job_ids: Default::default(),
 				stop_flag,
 			}),
+			cert: self.cert,
+			cert_pass: self.cert_pass,
 		}
 	}
 }
@@ -54,17 +61,19 @@ tarpc::service! {
 pub struct Broker {
 	// reason for inner pattern
 	inner: Arc<BrokerInner>,
+	pub cert: Option<PathBuf>,
+	pub cert_pass: Option<String>,
 }
 
 impl Broker {
 	pub fn stop(&self) {
 		self.inner.stop();
 	}
-	pub async fn run_async(&self) {
+	pub async fn run_async(&self) -> Result<(), failure::Error> {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] Listening."; "bind"=>%self.inner.bind_addr);
 
-		let listener = TcpListener::bind(&self.inner.bind_addr).unwrap();
+		let listener = TcpListener::bind(&self.inner.bind_addr).context("cannot bind to socket")?;
 
 		// let mut serving = listener.incoming().compat();
 		use crate::oneshot::StreamExt as OneshotStreamExt;
@@ -76,12 +85,12 @@ impl Broker {
 		let inner = self.inner.clone();
 		while let Some(stream) = await!(serving.next()) {
 			clone_all::clone_all!(log, inner);
-			crate::compat::tokio_spawn(
+			crate::compat::tokio_try_spawn(
 				async move {
 					// let inner = (&inner).clone();
 					let session_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
 					info!(log, "[Broker] New session";"id"=>&session_id);
-					let stream = stream.unwrap();
+					let stream = stream.context("cannot open stream")?;
 
 					// yamux
 					let mut mux = yamux::Connection::new(
@@ -89,7 +98,9 @@ impl Broker {
 						yamux::Config::default(),
 						yamux::Mode::Server,
 					);
-					let stream = await!(mux.next()).unwrap().unwrap();
+					let stream = await!(mux.next())
+						.ok_or(failure::err_msg("cannot open mux"))?
+						.context("cannot open mux")?;
 
 					// stream1: rpc server
 					let transport = tarpc_bincode_transport::new(stream).fuse(); //.fuse(∂);  // fuse from Future03 ext trait
@@ -112,13 +123,14 @@ impl Broker {
 									tarpc::client::Config::default(),
 									transport
 								))
-								.unwrap();
+								.context("error from tarpc serving")?;
 
 								await!(inner.workers.lock()).insert(session_id.clone(), client);
 
 								info!(log, "[Broker] New worker client registered";"id"=>&session_id);
 							}
-							await!(inner.stop_flag.clone()).unwrap();
+							let _ = await!(inner.stop_flag.clone()); // cancel
+							Result::<(), failure::Error>::Ok(())
 						},
 					)
 					.fuse();
@@ -128,7 +140,7 @@ impl Broker {
 						_ = session_serve => {
 							info!(log, "[Broker] Session closed"; "reason" => "rpc server TCP connection closed by peer","id"=>&session_id);
 						},
-						_ = fut2 => {
+						result = fut2 => {
 							info!(log, "[Broker] Session closed"; "reason" => "worker client TCP connection closed by peer","id"=>&session_id);
 						},
 						_ = stop_flag => {
@@ -137,10 +149,12 @@ impl Broker {
 					};
 					// clean-up
 					await!(inner.workers.lock()).remove(&session_id);
+					Ok(())
 				},
 			);
 		}
 		info!(log, "[Broker] exit");
+		Ok(())
 	}
 }
 
@@ -148,7 +162,7 @@ pub struct BrokerInner {
 	bind_addr: SocketAddr,
 	workers: Mutex<HashMap<String, crate::worker::Client>>, // Mutex: Send
 	// worker_conns: Mutex<HashMap<String,WorkerInfo>>,
-	jobs: Mutex<BTreeMap<String, Job>>, // order matters. can be concurrently used by multiple worker rpc calls
+	jobs: Mutex<IndexMap<String, Job>>, // order matters. can be concurrently used by multiple worker rpc calls
 	pending_job_ids: Mutex<BTreeSet<String>>, // order matters. can be concurrently used by multiple worker rpc calls
 	stop_flag: crate::oneshot::OneshotFlag<()>,
 }
@@ -237,11 +251,11 @@ impl Service for BrokerRPCServerImpl {
 	}
 
 	/// Broker <-> CLI
-	type JobEnqueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+	type JobEnqueueFut = Ready<()>;
 	fn job_enqueue(self, _: context::Context, spec: JobSpecification) -> Self::JobEnqueueFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] enqueue()"; "spec"=>?spec);
-		Box::pin(
+		crate::compat::tokio_try_spawn(Box::pin(
 			async move {
 				let job = spec.build();
 				let mut jobs = await!(self.broker.jobs.lock());
@@ -256,10 +270,13 @@ impl Service for BrokerRPCServerImpl {
 				// let futs = vec![];
 				info!(log, "Broadcasting to workers"; "num_workers"=>workers.len());
 				for (_worker_id, worker_client) in workers.iter_mut() {
-					await!(worker_client.on_new_job(context::current())).unwrap();
+					await!(worker_client.on_new_job(context::current()))
+						.context("fail to call on_new_job()")?;
 				}
+				Ok(())
 			},
-		)
+		));
+		futures::future::ready(())
 	}
 
 	type InfoFut = Pin<Box<dyn Future<Output = BrokerInfo> + Send>>;
@@ -278,9 +295,7 @@ impl Service for BrokerRPCServerImpl {
 	}
 }
 
-pub async fn new_broker_client(
-	addr: SocketAddr,
-) -> Result<Client, Box<dyn std::error::Error + 'static>> {
+pub async fn new_broker_client(addr: SocketAddr) -> Result<Client, failure::Error> {
 	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Broker."; "addr"=>&addr);
 	let stream: TcpStream = await!(TcpStream::connect(&addr).compat())?;
@@ -288,8 +303,8 @@ pub async fn new_broker_client(
 	let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
 	let stream = mux
 		.open_stream()
-		.expect("[Client] Failed to open 1st stream")
-		.unwrap(); // client
+		.context("[Client] Failed to open mux")?
+		.ok_or(failure::err_msg("[Client] Failed to open mux"))?; // client
 
 	let transport = tarpc_bincode_transport::Transport::from(stream);
 	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;

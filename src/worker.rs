@@ -4,8 +4,10 @@ use slog::{error, info};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use failure::ResultExt;
 use serde::{Deserialize, Serialize};
 use tarpc::context;
 use tokio::net::TcpStream;
@@ -16,8 +18,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::compat::Future01CompatExt;
 use futures::lock::Mutex;
-use futures::{future::Ready, FutureExt, StreamExt};
-use futures01::future::Future;
+use futures::{future::Fuse, future::Ready, Future, FutureExt, StreamExt};
 
 enum Message {
 	JobUpdate { job_id: String, status: JobStatus },
@@ -78,28 +79,34 @@ pub struct WorkerInner {
 }
 
 impl Worker {
-	pub async fn run_async(&self) -> Result<(), Box<dyn std::error::Error + 'static>> {
+	pub async fn run_async(&self) -> Result<(), failure::Error> {
 		let log = slog_scope::logger();
 
 		info!(log, "[Worker] Connecting"; "broker_addr"=>&self.inner.broker_addr);
-		let stream = await!(TcpStream::connect(&self.inner.broker_addr).compat()).unwrap();
-
-		info!(log, "[Worker] Connected");
+		let stream = await!(TcpStream::connect(&self.inner.broker_addr).compat())
+			.context("Couldn't connect to broker")?;
 
 		let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
 
 		// client
-		let stream = mux.open_stream().expect("Worker failed").unwrap(); // client
+		let stream = mux
+			.open_stream()
+			.context("[Worker] cannot open mux")?
+			.ok_or(failure::err_msg("[Worker] cannot open mux"))?; // client
 		let transport = tarpc_bincode_transport::new(stream);
 		let mut client = await!(crate::broker::new_stub(
 			tarpc::client::Config::default(),
 			transport
 		))
-		.unwrap();
-		await!(client.ping(context::current())).unwrap();
+		.context("cannot establish tarpc_bincode")?;
+		await!(client.ping(context::current()))
+			.context("test ping from worker to broker failed")?;
 
 		// server
-		let stream = mux.open_stream().expect("Worker failed").unwrap(); // server
+		let stream = mux
+			.open_stream()
+			.context("cannot open mux")?
+			.ok_or(failure::err_msg("[Worker] cannot open mux"))?; // server
 		let channel = {
 			let transport = tarpc_bincode_transport::new(stream).fuse();
 			let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
@@ -116,7 +123,10 @@ impl Worker {
 		let mut stop_flag = self.inner.stop_flag.clone().fuse();
 
 		let inner = self.inner.clone();
-		inner.sender.unbounded_send(Message::TrySchedule).unwrap(); // fetch jobs on start
+		inner
+			.sender
+			.unbounded_send(Message::TrySchedule)
+			.context("cannot enqueue worker msg q")?; // fetch jobs on start
 
 		let mut receiver = await!(self.receiver.lock());
 		let log_move = log.clone();
@@ -129,9 +139,13 @@ impl Worker {
 							info!(log, "[Worker] sending JobUpdate"; "job_id"=>&job_id, "status"=>?status);
 
 							if let JobStatus::Finished { .. } = status {
-								inner.sender.unbounded_send(Message::TrySchedule).unwrap();
+								inner
+									.sender
+									.unbounded_send(Message::TrySchedule)
+									.context("cannot enqueue msg")?;
 							}
-							await!(client.job_update(context::current(), job_id, status)).unwrap();
+							await!(client.job_update(context::current(), job_id, status))
+								.context("cannot call job_update()")?;
 						}
 						Message::TrySchedule => {
 							info!(log, "[Worker] msg: TrySchedule; JobRequest");
@@ -161,6 +175,7 @@ impl Worker {
 						}
 					};
 				}
+				Result::<(), failure::Error>::Ok(())
 			},
 		)
 		.fuse();
@@ -170,7 +185,7 @@ impl Worker {
 			_ = serve => {
 				info!(log, "[Worker] Disconnect"; "reason"=>"TCP connection closed by peer");
 			},
-			_ = msg_process => {
+			result = msg_process => {
 				info!(log, "[Worker] Disconnect"; "reason"=>"some error while processing msg");
 			}
 			_ = stop_flag => {
@@ -261,7 +276,7 @@ impl Queue {
 		let cmd = self.cmd.clone();
 		let envs = self.envs.clone();
 		let cwd = self.cwd.clone();
-		let result: Result<ExitStatus, &'static str> = await!(
+		let result: Result<ExitStatus, failure::Error> = await!(
 			async move {
 				let sender = sender_;
 				let mut job = job_;
@@ -294,21 +309,16 @@ impl Queue {
 					.stdout(Stdio::null())
 					.stderr(Stdio::null())
 					.spawn_async()
-					.map_err(|_err| "fail to spawn child")?;
+					.context("fail to spawn child")?;
 
 				sender
 					.unbounded_send(Message::JobUpdate {
 						job_id: job.id.clone(),
 						status: JobStatus::Running { pid: child.id() },
 					})
-					.map_err(|_err| "[Worker] error sending JobUpdate msg")?;
+					.context("[Worker] error sending JobUpdate msg")?;
 
-				// child is 01 future
-				let status = await!(child
-					.map_err(|err| format!("cannot wait child process: {}", err))
-					.compat())
-				.unwrap();
-
+				let status = await!(child.compat()).context("cannot wait child process")?;
 				Ok(status)
 			}
 		);
