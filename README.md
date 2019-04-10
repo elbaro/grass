@@ -35,10 +35,16 @@ for lr in [0.01, 0.1]:
 ```
 
 ## Example - Multi nodes
+Create a self-signed cert
+```
+openssl req -x509 -newkey rsa:4096 -keyout myKey.pem -out cert.pem -days 365 -nodes
+openssl pkcs12 -export -out keyStore.p12 -inkey myKey.pem -in cert.pem
+
+```
 
 Broker
 ```
-grass daemon --bind 0.0.0.0:7500 --no-worker
+grass daemon --bind 0.0.0.0:7500 --no-worker --cert my_cert.p12
 ```
 
 Worker
