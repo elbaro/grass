@@ -108,30 +108,33 @@ impl Daemon {
 					.compat()
 					.take_until(inner.stop_flag.clone().map(|_| ()));
 
-				let der = {
-					let mut file =
-						std::fs::File::open("../keyStore.p12").context("file does not exist")?;
-					let mut bytes = vec![];
-					file.read_to_end(&mut bytes)
-						.context("Fail to read .p12 key")?;
-					bytes
-				};
-				let cert = native_tls::Identity::from_pkcs12(&der[..], "1234")
-					.context("Wrong passphrase for .p12")?;
-				let tls_acceptor = native_tls::TlsAcceptor::builder(cert)
-					.build()
-					.context("Error building native_tls::TlsAcceptor")?;
-				let tls_acceptor = tokio_tls::TlsAcceptor::from(tls_acceptor);
+				// let der = {
+				// 	let mut file =
+				// 		std::fs::File::open("	keyStore.p12").context("p12 file does not exist")?;
+				// 	let mut bytes = vec![];
+				// 	file.read_to_end(&mut bytes)
+				// 		.context("Fail to read .p12 key")?;
+				// 	bytes
+				// };
+
+				// let cert = native_tls::Identity::from_pkcs12(&der[..], "1234")
+				// 	.context("Wrong passphrase for .p12")?;
+				// let tls_acceptor = native_tls::TlsAcceptor::builder(cert)
+				// 	.build()
+				// 	.context("Error building native_tls::TlsAcceptor")?;
+				// let tls_acceptor = tokio_tls::TlsAcceptor::from(tls_acceptor);
 
 				while let Some(stream) = await!(listener.next()) {
 					info!(log, "[Daemon] new RPC connection");
 
-					clone_all::clone_all!(log, inner, tls_acceptor);
+					clone_all::clone_all!(log, inner
+						// ,tls_acceptor
+					);
 					crate::compat::tokio_try_spawn(
 						async move {
 							let stream = stream.context("cannot open tcp stream")?;
-							let stream = await!(tls_acceptor.accept(stream).compat())
-								.context("fail to handshake tls")?;
+							// let stream = await!(tls_acceptor.accept(stream).compat())
+							// 	.context("fail to handshake tls")?;
 
 							let transport = tarpc_bincode_transport::new(stream).fuse(); // fuse from Future03 ext trait
 							let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
@@ -214,17 +217,17 @@ pub async fn new_daemon_client() -> Result<Client, failure::Error> {
 	info!(log, "[Client] Connecting to Daemon.");
 	let tcp: UnixStream = await!(UnixStream::connect("/tmp/grass.sock").compat())
 		.context("Could not connect to Daemon")?;
-	let tls_connector = tokio_tls::TlsConnector::from(
-		native_tls::TlsConnector::builder()
-			.use_sni(false)
-			.danger_accept_invalid_hostnames(true)
-			.danger_accept_invalid_certs(true)
-			.build()
-			.context("cannot build tls connector")?,
-	);
-	let tls =
-		await!(tls_connector.connect("domain", tcp).compat()).context("cannot establish TLS")?;
-	let transport = tarpc_bincode_transport::Transport::from(tls);
+	// let tls_connector = tokio_tls::TlsConnector::from(
+	// 	native_tls::TlsConnector::builder()
+	// 		.use_sni(false)
+	// 		.danger_accept_invalid_hostnames(true)
+	// 		.danger_accept_invalid_certs(true)
+	// 		.build()
+	// 		.context("cannot build tls connector")?,
+	// );
+	// let tcp =
+	// 	await!(tls_connector.connect("domain", tcp).compat()).context("cannot establish TLS")?;
+	let transport = tarpc_bincode_transport::Transport::from(tcp);
 	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
 	info!(log, "[Client] Connected to Daemon.");
 	Ok(client)
