@@ -8,6 +8,7 @@
 #[macro_use]
 extern crate clap;
 
+use colored::*;
 use prettytable::{cell, color, row, Attr, Cell, Row, Table};
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn};
@@ -21,17 +22,15 @@ use futures::compat::Future01CompatExt;
 use futures::compat::Stream01CompatExt;
 use futures::{FutureExt, TryFutureExt};
 
-mod cli;
-mod logger;
-mod objects;
-
 mod broker;
+mod cli;
 mod compat;
 mod daemon;
+mod logger;
+mod objects;
 mod oneshot;
 mod rpc;
 mod worker;
-
 use objects::{Job, JobSpecification, JobStatus, QueueCapacity, ResourceRequirement};
 use worker::QueueConfig;
 
@@ -186,6 +185,18 @@ fn main() {
 			// worker: none
 			// worker: 2 brokers, 127.0.0.1:11, remote.com:111
 
+			// [broker]
+			// pending jobs
+
+			// [worker: hostname]
+			//     os:
+			//     os_dist:
+			//     [queue: 1]
+			//         available: ,
+			//         [running jobs]
+			//     [queue: 2]
+			//         [running jobs]
+
 			let broker_addr: SocketAddr = matches
 				.value_of("broker")
 				.unwrap_or("127.0.0.1:7500")
@@ -194,93 +205,139 @@ fn main() {
 
 			compat::tokio_run(
 				async move {
-					let mut t = term::stdout().unwrap();
-					// query daemon
-					println!("[Daemon]");
 					{
-						println!("N/A");
-						// let mut client = await!(daemon::new_daemon_client()).unwrap();
-						// let status = await!(client.status(context::current())).unwrap();
-						// info!(log, "[Broker]");
+						println!("{}", "[Daemon]".bold());
+
+						let mut client = await!(daemon::new_daemon_client()).unwrap();
+						let info = await!(client.info(context::current())).unwrap();
+						if info.broker {
+							println!("Broker: Running");
+						} else {
+							println!("Broker: -");
+						}
+						if let Some(worker) = info.worker.as_ref() {
+							println!("Worker: {}", worker.broker_addr);
+						} else {
+							println!("Worker: -");
+						}
 					}
 
-					// query broker
-					let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
-					let info = await!(client.info(context::current())).unwrap();
-					t.fg(term::color::WHITE).unwrap();
-					t.attr(term::Attr::Bold).unwrap();
-					writeln!(t, "[Broker @ {:?}]", &info.bind_addr).unwrap();
-					t.reset().unwrap();
+					// broker
+					{
+						let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
+						let info = await!(client.info(context::current())).unwrap();
+						println!("{}", format!("[Broker @ {:?}]", &info.bind_addr).bold());
 
-					let mut table = Table::new();
-					table.add_row(row![
-						"created",
-						"queue",
-						"job id",
-						"status",
-						"command",
-						"allocation",
-						"result"
-					]);
+						{
+							use chrono::TimeZone;
+							// workers
+							let mut table = Table::new();
+							table.add_row(row![
+								"hostname",
+								"uptime",
+								"heartbeat",
+								"load",
+								"queues"
+							]);
+							for worker in &info.workers {
+								table.add_row(row![
+									worker.node_spec.hostname,
+									worker
+										.node_spec
+										.get_uptime()
+										.to_std()
+										.map(|d| timeago::Formatter::new().convert(d))
+										.unwrap_or("time sync mismatch".to_string())
+								]);
+							}
+							table.printstd();
+							println!();
+						}
 
-					for job in &info.jobs {
-						let cmd: String = job.spec.cmd.join(" ");
+						{
+							// queues
+							// let mut table = Table::new();
+							// table.add_row(row![
+							// 	"q_name",
+							// 	"cwd",
+							// 	"cmd",
+							// 	"env",
+							// 	"available",
+							// 	"running"
+							// ]);
+						}
 
-						let (status_cell, result) = match &job.status {
-							JobStatus::Pending => (Cell::new("Pending"), "".to_string()),
-							JobStatus::Running { pid } => (
-								Cell::new("Running")
-									.with_style(Attr::ForegroundColor(color::YELLOW)),
-								format!("pid: {}", pid),
-							),
-							JobStatus::Finished {
-								exit_status: Ok(()),
-								..
-							} => (
-								Cell::new("Success")
-									.with_style(Attr::ForegroundColor(color::GREEN)),
-								"-".to_string(),
-							),
-							JobStatus::Finished {
-								exit_status: Err(err),
-								..
-							} => (
-								Cell::new("Failed").with_style(Attr::ForegroundColor(color::RED)),
-								err.to_string(),
-							),
-						};
+						let mut table = Table::new();
+						table.add_row(row![
+							"created",
+							"queue",
+							"job id",
+							"status",
+							"command",
+							"allocation",
+							"result"
+						]);
 
-						let allocation: String = job
-							.allocation
-							.as_ref()
-							.map(|x| serde_json::to_string(&x).unwrap())
-							.unwrap_or_default();
+						for job in &info.jobs {
+							let cmd: String = job.spec.cmd.join(" ");
 
-						// wrap cmd and result
-						let cmd = textwrap::fill(&cmd, 30);
-						let result = textwrap::fill(&result, 20);
-						let allocation = textwrap::fill(&allocation, 20);
+							let (status_cell, result) = match &job.status {
+								JobStatus::Pending => (Cell::new("Pending"), "".to_string()),
+								JobStatus::Running { pid } => (
+									Cell::new("Running")
+										.with_style(Attr::ForegroundColor(color::YELLOW)),
+									format!("pid: {}", pid),
+								),
+								JobStatus::Finished {
+									exit_status: Ok(()),
+									..
+								} => (
+									Cell::new("Success")
+										.with_style(Attr::ForegroundColor(color::GREEN)),
+									"-".to_string(),
+								),
+								JobStatus::Finished {
+									exit_status: Err(err),
+									..
+								} => (
+									Cell::new("Failed")
+										.with_style(Attr::ForegroundColor(color::RED)),
+									err.to_string(),
+								),
+							};
 
-						table.add_row(Row::new(vec![
-							Cell::new(
-								&job.created_at
-									.with_timezone(&chrono::Local)
-									.format("%Y-%m-%d %P %l:%M:%S")
-									.to_string(),
-							),
-							Cell::new(&job.spec.q_name),
-							Cell::new(&job.id[..8]),
-							status_cell,
-							Cell::new(&cmd),
-							Cell::new(&allocation),
-							Cell::new(&result),
-						]));
+							let allocation: String = job
+								.allocation
+								.as_ref()
+								.map(|x| serde_json::to_string(&x).unwrap())
+								.unwrap_or_default();
+
+							// wrap cmd and result
+							let cmd = textwrap::fill(&cmd, 30);
+							let result = textwrap::fill(&result, 20);
+							let allocation = textwrap::fill(&allocation, 20);
+
+							table.add_row(Row::new(vec![
+								Cell::new(
+									&job.created_at
+										.with_timezone(&chrono::Local)
+										.format("%Y-%m-%d %P %l:%M:%S")
+										.to_string(),
+								),
+								Cell::new(&job.spec.q_name),
+								Cell::new(&job.id[..8]),
+								status_cell,
+								Cell::new(&cmd),
+								Cell::new(&allocation),
+								Cell::new(&result),
+							]));
+						}
+
+						if table.is_empty() {
+							println!("no jobs");
+						}
+						table.printstd();
 					}
-
-					if table.is_empty() {
-						println!("no jobs");
-					}
-					table.printstd();
 				}, // async move
 			); // tokio_run
 		}
@@ -305,7 +362,7 @@ fn main() {
 						.parse()
 						.expect("fail to parse --bind address"),
 					cert: matches.value_of("cert").map(|s| s.into()),
-					cert_pass: matches.value_of("cert-pass").map(|s| s.into())
+					cert_pass: matches.value_of("cert-pass").map(|s| s.into()),
 				})
 			};
 

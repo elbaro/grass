@@ -1,4 +1,5 @@
 use crate::broker::{Broker, BrokerConfig};
+use crate::objects::QueueCapacity;
 use crate::worker::{QueueConfig, Worker, WorkerConfig};
 
 use std::net::SocketAddr;
@@ -6,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use failure::ResultExt;
+use serde::{Deserialize, Serialize};
 use slog::{error, info};
 
 use futures::compat::Compat;
@@ -14,25 +16,23 @@ use futures::compat::Future01CompatExt;
 use futures::compat::Stream01CompatExt;
 use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
 use futures01::Stream as Stream01;
-
 use tokio_async_await::compat::backward;
 
 use crate::oneshot::StreamExt as OneshotStreamExt;
-
-use crate::objects::QueueCapacity;
 
 tarpc::service! {
 	rpc stop();
 	rpc create_queue(config: QueueConfig);
 	rpc delete_queue(name:String);
+	rpc info() -> DaemonInfo;
 }
 
 pub struct Daemon {
 	// inner+Arc is required because tokio needs 'static
-	inner: Arc<DaemonInner>,
+	pub inner: Arc<DaemonInner>,
 }
 
-struct DaemonInner {
+pub struct DaemonInner {
 	pub broker: Option<Broker>, // optionally has bind addr
 	pub worker: Option<Worker>, // optionally has brok addr
 
@@ -207,6 +207,11 @@ impl Service for DaemonRPCServerImpl {
 			},
 		)
 	}
+
+	type InfoFut = Pin<Box<dyn Future<Output = DaemonInfo> + Send>>;
+	fn info(self, _: context::Context) -> Self::InfoFut {
+		Box::pin(async move { await!(DaemonInfo::from(self.daemon_inner.clone())) })
+	}
 }
 
 use tokio::net::UnixStream;
@@ -231,4 +236,31 @@ pub async fn new_daemon_client() -> Result<Client, failure::Error> {
 	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
 	info!(log, "[Client] Connected to Daemon.");
 	Ok(client)
+}
+
+use crate::broker::BrokerInfo;
+use crate::worker::WorkerInfo;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonInfo {
+	pub broker: bool,
+	pub worker: Option<WorkerInfo>,
+}
+
+impl DaemonInfo {
+	pub async fn from(daemon: Arc<DaemonInner>) -> DaemonInfo {
+		DaemonInfo {
+			broker: daemon.broker.is_some(),
+			// if let Some(broker) = daemon.broker.as_ref() {
+			// 	Some(await!(BrokerInfo::from(broker.inner.clone())))
+			// } else {
+			// 	None
+			// },
+			worker: if let Some(worker) = daemon.worker.as_ref() {
+				Some(await!(WorkerInfo::from(worker.inner.clone())))
+			} else {
+				None
+			},
+		}
+	}
 }

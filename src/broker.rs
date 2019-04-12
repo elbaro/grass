@@ -1,4 +1,6 @@
-use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity, WorkerInfo};
+use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity};
+use crate::worker::WorkerInfo;
+
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -15,17 +17,14 @@ use futures01::stream::Stream as Stream01;
 use futures01::Future as Future01;
 
 use failure::ResultExt;
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
+use slog::{error, info, warn};
 use tarpc::context;
 use tarpc::server::Handler;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
-
-#[allow(unused_imports)]
-use slog::{error, info, warn};
-
-use serde::{Deserialize, Serialize};
-
-use indexmap::IndexMap;
 
 pub struct BrokerConfig {
 	pub bind_addr: SocketAddr,
@@ -39,6 +38,7 @@ impl BrokerConfig {
 			inner: Arc::new(BrokerInner {
 				bind_addr: self.bind_addr,
 				workers: Default::default(),
+				worker_conns: Default::default(),
 				jobs: Default::default(),
 				pending_job_ids: Default::default(),
 				stop_flag,
@@ -60,7 +60,7 @@ tarpc::service! {
 
 pub struct Broker {
 	// reason for inner pattern
-	inner: Arc<BrokerInner>,
+	pub inner: Arc<BrokerInner>,
 	pub cert: Option<PathBuf>,
 	pub cert_pass: Option<String>,
 }
@@ -119,13 +119,18 @@ impl Broker {
 							if let Some(Ok(conn2)) = await!(mux.next()) {
 								// may block, but exit with flag
 								let transport = tarpc_bincode_transport::new(conn2);
-								let client = await!(crate::worker::new_stub(
+								let mut client = await!(crate::worker::new_stub(
 									tarpc::client::Config::default(),
 									transport
 								))
 								.context("error from tarpc serving")?;
 
-								await!(inner.workers.lock()).insert(session_id.clone(), client);
+								// request initial WorkerInfo
+								let info = await!(client.info(context::current()))
+									.expect("fail to info()");
+								await!(inner.workers.lock()).insert(session_id.clone(), info);
+								await!(inner.worker_conns.lock())
+									.insert(session_id.clone(), client);
 
 								info!(log, "[Broker] New worker client registered";"id"=>&session_id);
 							}
@@ -149,6 +154,7 @@ impl Broker {
 					};
 					// clean-up
 					await!(inner.workers.lock()).remove(&session_id);
+					await!(inner.worker_conns.lock()).remove(&session_id);
 					Ok(())
 				},
 			);
@@ -160,8 +166,8 @@ impl Broker {
 
 pub struct BrokerInner {
 	bind_addr: SocketAddr,
-	workers: Mutex<HashMap<String, crate::worker::Client>>, // Mutex: Send
-	// worker_conns: Mutex<HashMap<String,WorkerInfo>>,
+	worker_conns: Mutex<HashMap<String, crate::worker::Client>>, // Mutex: Send
+	workers: Mutex<HashMap<String, WorkerInfo>>,
 	jobs: Mutex<IndexMap<String, Job>>, // order matters. can be concurrently used by multiple worker rpc calls
 	pending_job_ids: Mutex<BTreeSet<String>>, // order matters. can be concurrently used by multiple worker rpc calls
 	stop_flag: crate::oneshot::OneshotFlag<()>,
@@ -175,7 +181,20 @@ impl BrokerInner {
 pub struct BrokerInfo {
 	pub bind_addr: SocketAddr,
 	pub jobs: Vec<Job>,
-	pub workers: Vec<String>,
+	pub workers: Vec<WorkerInfo>,
+}
+
+impl BrokerInfo {
+	pub async fn from(broker: Arc<BrokerInner>) -> BrokerInfo {
+		let jobs = await!(broker.jobs.lock());
+		let workers = await!(broker.workers.lock());
+
+		BrokerInfo {
+			bind_addr: broker.bind_addr,
+			jobs: jobs.values().cloned().collect(),
+			workers: workers.values().cloned().collect(),
+		}
+	}
 }
 
 // instance per worker connection
@@ -266,10 +285,10 @@ impl Service for BrokerRPCServerImpl {
 				pending_job_ids.insert(job_id);
 
 				// broadcast to clients
-				let mut workers = await!(self.broker.workers.lock());
+				let mut worker_conns = await!(self.broker.worker_conns.lock());
 				// let futs = vec![];
-				info!(log, "Broadcasting to workers"; "num_workers"=>workers.len());
-				for (_worker_id, worker_client) in workers.iter_mut() {
+				info!(log, "Broadcasting to workers"; "num_workers"=>worker_conns.len());
+				for (_worker_id, worker_client) in worker_conns.iter_mut() {
 					await!(worker_client.on_new_job(context::current()))
 						.context("fail to call on_new_job()")?;
 				}
@@ -281,17 +300,7 @@ impl Service for BrokerRPCServerImpl {
 
 	type InfoFut = Pin<Box<dyn Future<Output = BrokerInfo> + Send>>;
 	fn info(self, _: context::Context) -> Self::InfoFut {
-		Box::pin(
-			async move {
-				let jobs = await!(self.broker.jobs.lock());
-
-				BrokerInfo {
-					bind_addr: self.broker.bind_addr,
-					jobs: jobs.values().cloned().collect(),
-					workers: Default::default(),
-				}
-			},
-		)
+		Box::pin(async move { await!(BrokerInfo::from(self.broker)) })
 	}
 }
 

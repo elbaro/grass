@@ -201,17 +201,6 @@ pub enum JobStatus {
 	},
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WorkerInfo {
-	host: String,
-	runnning_since: chrono::DateTime<chrono::Utc>,
-}
-impl WorkerInfo {
-	fn uptime(&self) -> std::time::Duration {
-		std::time::Duration::new(0, 5)
-	}
-}
-
 /// Job has information about running context.
 /// Job consumes resources from a queue, and returns back when finished.
 ///

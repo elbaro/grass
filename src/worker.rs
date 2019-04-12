@@ -47,6 +47,9 @@ impl WorkerConfig {
 tarpc::service! {
 	rpc status() -> String;
 	rpc on_new_job();
+	rpc info() -> WorkerInfo;
+	// rpc info_jobs();
+	// rpc info_resources();
 }
 
 pub struct Worker {
@@ -56,7 +59,7 @@ pub struct Worker {
 	/// 	Hence only attributes required for tarpc server are in inner.
 	///
 	/// 	on_new_job() requires `sender`.
-	inner: Arc<WorkerInner>,
+	pub inner: Arc<WorkerInner>,
 	receiver: Mutex<UnboundedReceiver<Message>>,
 }
 
@@ -229,6 +232,11 @@ impl Service for WorkerRPCServerImpl {
 		info!(log, "[Worker] status()");
 		futures::future::ready("[dummy status]".to_string())
 	}
+
+	type InfoFut = std::pin::Pin<Box<dyn Future<Output = WorkerInfo> + Send>>;
+	fn info(self, _: context::Context) -> Self::InfoFut {
+		Box::pin(async move { await!(WorkerInfo::from(self.worker.clone())) })
+	}
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,6 +259,7 @@ impl QueueConfig {
 			capacity: self.capacity,
 			available,
 			jobs: Default::default(),
+			running: Default::default(),
 		}
 	}
 }
@@ -263,6 +272,9 @@ pub struct Queue {
 	pub capacity: QueueCapacity,
 	pub available: Mutex<QueueCapacity>,
 	jobs: Mutex<BTreeMap<String, Job>>,
+
+	// stats
+	pub running: std::sync::atomic::AtomicU32,
 }
 
 impl Queue {
@@ -276,13 +288,15 @@ impl Queue {
 		let cmd = self.cmd.clone();
 		let envs = self.envs.clone();
 		let cwd = self.cwd.clone();
+		self.running
+			.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 		let result: Result<ExitStatus, failure::Error> = await!(
 			async move {
 				let sender = sender_;
 				let mut job = job_;
 				// TODO: lock
 				job.status = JobStatus::Running { pid: 0 };
-				let allocation = &job.allocation.as_ref().unwrap();
+				let allocation = &job.allocation.as_ref().ok_or(failure::err_msg("spawning job with no allocation"))?;
 
 				let cmd = [&cmd[..], &job.spec.cmd[..]].concat();
 				let envs = [&envs[..], &job.spec.envs[..]].concat();
@@ -291,18 +305,19 @@ impl Queue {
 					.args(
 						cmd[1..]
 							.iter()
-							.map(|x| strfmt::strfmt(x, &allocation.0).unwrap())
-							.collect::<Vec<String>>(),
+							.map(|x|->Result<String,failure::Error> {
+								Ok(strfmt::strfmt(x, &allocation.0).context("cmd interpolation failed")?)
+							})
+							.collect::<Result<Vec<String>, failure::Error>>()?,
 					)
 					.envs(
 						envs.iter()
-							.map(|(k, v)| {
-								(
-									strfmt::strfmt(k, &allocation.0).unwrap(),
-									strfmt::strfmt(v, &allocation.0).unwrap(),
-								)
+							.map(|(k, v)|->Result<_,failure::Error> {
+								let a = strfmt::strfmt(k, &allocation.0).context("env key interpolation failed")?;
+								let b = strfmt::strfmt(v, &allocation.0).context("env value interpolation failed")?;
+								Ok((a,b))
 							})
-							.collect::<Vec<_>>(),
+							.collect::<Result<Vec<_>,failure::Error>>()?,
 					)
 					.current_dir(cwd)
 					.stdin(Stdio::null())
@@ -342,6 +357,9 @@ impl Queue {
 			available.restore(&job);
 		}
 
+		self.running
+			.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
 		sender
 			.unbounded_send(Message::JobUpdate {
 				job_id,
@@ -351,5 +369,77 @@ impl Queue {
 				},
 			})
 			.unwrap();
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkerNodeSpec {
+	pub hostname: String,
+	pub cpu_num: u32,
+	pub os_release: String,
+	pub runnning_since: chrono::DateTime<chrono::Utc>,
+}
+
+impl WorkerNodeSpec {
+	fn new() -> WorkerNodeSpec {
+		WorkerNodeSpec {
+			hostname: sys_info::hostname().unwrap_or("[unknown]".to_string()),
+			cpu_num: sys_info::cpu_num().unwrap_or(0),
+			os_release: sys_info::os_release().unwrap_or("[unknown]".to_string()),
+			runnning_since: chrono::Utc::now(),
+		}
+	}
+
+	pub fn get_uptime(&self) -> chrono::Duration {
+		chrono::Utc::now().signed_duration_since(self.runnning_since)
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QueueInfo {
+	name: String,
+	running: u32,
+	// pending: usize,
+	capacity: QueueCapacity,
+	available: QueueCapacity,
+}
+
+impl QueueInfo {
+	async fn from(q: &Queue) -> QueueInfo {
+		let available = await!(q.available.lock()).clone();
+		QueueInfo {
+			name: q.name.clone(),
+			capacity: q.capacity.clone(),
+			available: available,
+			running: q.running.load(std::sync::atomic::Ordering::SeqCst),
+			// pending: 0,
+		}
+	}
+}
+
+/// has a detailed information about node, including jobs
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkerInfo {
+	// static
+	pub broker_addr: SocketAddr,
+	pub node_spec: WorkerNodeSpec,
+	// dynamic
+	pub queue_infos: Vec<QueueInfo>,
+	// pub state: WorkerState, // cpu load, running job num, ..
+}
+
+impl WorkerInfo {
+	pub async fn from(worker: Arc<WorkerInner>) -> WorkerInfo {
+		let queues = await!(worker.queues.lock());
+		let mut q_infos = vec![];
+		for (_q_name, q) in queues.iter() {
+			q_infos.push(await!(QueueInfo::from(&q)));
+		}
+
+		WorkerInfo {
+			broker_addr: worker.broker_addr.clone(),
+			node_spec: WorkerNodeSpec::new(),
+			queue_infos: q_infos,
+		}
 	}
 }
