@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tarpc::context;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio::timer::Interval;
 use tokio_process::CommandExt;
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -23,6 +24,7 @@ use futures::{future::Fuse, future::Ready, Future, FutureExt, StreamExt};
 enum Message {
 	JobUpdate { job_id: String, status: JobStatus },
 	TrySchedule,
+	SendQueueInfos,
 }
 
 pub struct WorkerConfig {
@@ -67,10 +69,18 @@ impl Worker {
 	pub async fn create_queue(&self, config: QueueConfig) {
 		let mut queues = await!(self.inner.queues.lock());
 		queues.insert(config.name.clone(), Arc::new(config.build()));
+		self.inner
+			.sender
+			.unbounded_send(Message::SendQueueInfos)
+			.expect("cannot enqueue worker msg");
 	}
 	pub async fn delete_queue(&self, name: String) {
 		let mut queues = await!(self.inner.queues.lock());
 		queues.remove(&name);
+		self.inner
+			.sender
+			.unbounded_send(Message::SendQueueInfos)
+			.expect("cannot enqueue worker msg");
 	}
 }
 
@@ -175,6 +185,14 @@ impl Worker {
 									);
 								}
 							}
+						}
+						Message::SendQueueInfos => {
+							// send queue info
+							let queues = await!(inner.queues.lock());
+							let q_infos = await!(QueueInfo::vec_from_queues(&queues));
+							info!(log, "[Worker] msg: SendQueueInfos");
+							await!(client.update_worker_state(context::current(), q_infos))
+								.context("[Worker] fail update_worker_state()")?;
 						}
 					};
 				}
@@ -296,7 +314,10 @@ impl Queue {
 				let mut job = job_;
 				// TODO: lock
 				job.status = JobStatus::Running { pid: 0 };
-				let allocation = &job.allocation.as_ref().ok_or(failure::err_msg("spawning job with no allocation"))?;
+				let allocation = &job
+					.allocation
+					.as_ref()
+					.ok_or(failure::err_msg("spawning job with no allocation"))?;
 
 				let cmd = [&cmd[..], &job.spec.cmd[..]].concat();
 				let envs = [&envs[..], &job.spec.envs[..]].concat();
@@ -305,19 +326,22 @@ impl Queue {
 					.args(
 						cmd[1..]
 							.iter()
-							.map(|x|->Result<String,failure::Error> {
-								Ok(strfmt::strfmt(x, &allocation.0).context("cmd interpolation failed")?)
+							.map(|x| -> Result<String, failure::Error> {
+								Ok(strfmt::strfmt(x, &allocation.0)
+									.context("cmd interpolation failed")?)
 							})
 							.collect::<Result<Vec<String>, failure::Error>>()?,
 					)
 					.envs(
 						envs.iter()
-							.map(|(k, v)|->Result<_,failure::Error> {
-								let a = strfmt::strfmt(k, &allocation.0).context("env key interpolation failed")?;
-								let b = strfmt::strfmt(v, &allocation.0).context("env value interpolation failed")?;
-								Ok((a,b))
+							.map(|(k, v)| -> Result<_, failure::Error> {
+								let a = strfmt::strfmt(k, &allocation.0)
+									.context("env key interpolation failed")?;
+								let b = strfmt::strfmt(v, &allocation.0)
+									.context("env value interpolation failed")?;
+								Ok((a, b))
 							})
-							.collect::<Result<Vec<_>,failure::Error>>()?,
+							.collect::<Result<Vec<_>, failure::Error>>()?,
 					)
 					.current_dir(cwd)
 					.stdin(Stdio::null())
@@ -376,6 +400,7 @@ impl Queue {
 pub struct WorkerNodeSpec {
 	pub hostname: String,
 	pub cpu_num: u32,
+	pub os: String,
 	pub os_release: String,
 	pub runnning_since: chrono::DateTime<chrono::Utc>,
 }
@@ -385,6 +410,7 @@ impl WorkerNodeSpec {
 		WorkerNodeSpec {
 			hostname: sys_info::hostname().unwrap_or("[unknown]".to_string()),
 			cpu_num: sys_info::cpu_num().unwrap_or(0),
+			os: sys_info::os_type().unwrap_or("[unknown]".to_string()),
 			os_release: sys_info::os_release().unwrap_or("[unknown]".to_string()),
 			runnning_since: chrono::Utc::now(),
 		}
@@ -397,11 +423,11 @@ impl WorkerNodeSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueueInfo {
-	name: String,
-	running: u32,
+	pub name: String,
+	pub running: u32,
 	// pending: usize,
-	capacity: QueueCapacity,
-	available: QueueCapacity,
+	pub capacity: QueueCapacity,
+	pub available: QueueCapacity,
 }
 
 impl QueueInfo {
@@ -414,6 +440,14 @@ impl QueueInfo {
 			running: q.running.load(std::sync::atomic::Ordering::SeqCst),
 			// pending: 0,
 		}
+	}
+
+	async fn vec_from_queues(queues: &BTreeMap<String, Arc<Queue>>) -> Vec<QueueInfo> {
+		let mut q_infos = vec![];
+		for (_q_name, q) in queues.iter() {
+			q_infos.push(await!(QueueInfo::from(&q)));
+		}
+		q_infos
 	}
 }
 
@@ -431,10 +465,7 @@ pub struct WorkerInfo {
 impl WorkerInfo {
 	pub async fn from(worker: Arc<WorkerInner>) -> WorkerInfo {
 		let queues = await!(worker.queues.lock());
-		let mut q_infos = vec![];
-		for (_q_name, q) in queues.iter() {
-			q_infos.push(await!(QueueInfo::from(&q)));
-		}
+		let q_infos = await!(QueueInfo::vec_from_queues(&queues));
 
 		WorkerInfo {
 			broker_addr: worker.broker_addr.clone(),

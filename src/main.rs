@@ -233,21 +233,33 @@ fn main() {
 							// workers
 							let mut table = Table::new();
 							table.add_row(row![
-								"hostname",
-								"uptime",
-								"heartbeat",
-								"load",
+								"hostname", "os", "uptime",
+								// "heartbeat",
+								// "load",
 								"queues"
 							]);
 							for worker in &info.workers {
 								table.add_row(row![
 									worker.node_spec.hostname,
-									worker
+									format!(
+										"{} ({})",
+										&worker.node_spec.os, worker.node_spec.os_release
+									), // os
+									worker // uptime
 										.node_spec
 										.get_uptime()
 										.to_std()
 										.map(|d| timeago::Formatter::new().convert(d))
-										.unwrap_or("time sync mismatch".to_string())
+										.unwrap_or("time sync mismatch".to_string()),
+									worker
+										.queue_infos
+										.iter() // queues
+										.map(|q_info| format!(
+											"{} (? running)",
+											&q_info.name, &q_info.running
+										))
+										.collect::<Vec<_>>()
+										.join(", ")
 								]);
 							}
 							table.printstd();

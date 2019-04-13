@@ -1,5 +1,5 @@
 use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity};
-use crate::worker::WorkerInfo;
+use crate::worker::{WorkerInfo, QueueInfo};
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -56,6 +56,7 @@ tarpc::service! {
 	rpc job_enqueue(spec: JobSpecification);
 	// rpc job_enqueue(spec: String);
 	rpc info() -> BrokerInfo;
+	rpc update_worker_state(q_infos: Vec<QueueInfo>);
 }
 
 pub struct Broker {
@@ -109,6 +110,7 @@ impl Broker {
 
 					let mut session_serve = channel
 						.respond_with(serve(BrokerRPCServerImpl {
+							session_id: session_id.clone(),
 							broker: inner.clone(),
 						}))
 						.fuse();
@@ -201,6 +203,7 @@ impl BrokerInfo {
 #[derive(Clone)]
 struct BrokerRPCServerImpl {
 	// Se	nd
+	session_id: String,
 	broker: Arc<BrokerInner>,
 }
 
@@ -301,6 +304,16 @@ impl Service for BrokerRPCServerImpl {
 	type InfoFut = Pin<Box<dyn Future<Output = BrokerInfo> + Send>>;
 	fn info(self, _: context::Context) -> Self::InfoFut {
 		Box::pin(async move { await!(BrokerInfo::from(self.broker)) })
+	}
+
+	type UpdateWorkerStateFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+	fn update_worker_state(self, _:context::Context, q_infos: Vec<QueueInfo>) -> Self::UpdateWorkerStateFut{
+		Box::pin(async move {
+			let mut workers = await!(self.broker.workers.lock());
+			if let Some(worker_info) = workers.get_mut(&self.session_id) {
+				(*worker_info).queue_infos = q_infos;
+			}
+		})
 	}
 }
 
