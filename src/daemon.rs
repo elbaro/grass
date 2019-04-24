@@ -16,7 +16,6 @@ use futures::compat::Future01CompatExt;
 use futures::compat::Stream01CompatExt;
 use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt};
 use futures01::Stream as Stream01;
-use tokio_async_await::compat::backward;
 
 use crate::oneshot::StreamExt as OneshotStreamExt;
 

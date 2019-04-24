@@ -9,20 +9,20 @@ travis-ci = { repository = "elbaro/grass", branch = "master" }
 codecov = { repository = "elbaro/grass", branch = "master", service = "github" }
 
 [dependencies]
-clap = "2.32.0"
+clap = "2.33.0"
 strfmt = "0.1.6"
 log = "0.4.6"
 slog = "2.4.1"
 slog-term = "2.4.0"
 slog-async = "2.3.0"
 pidlock = "0.1.2"
-curl = "0.4.19"
-uuid = {version="0.7.3", features=["v4"]}
+curl = "0.4.21"
+uuid = {version="0.7.4", features=["v4"]}
 serde_json = "1.0.39"
 json5 = "0.2.4"
 crossbeam = "0.7.1"
 clone_all = "0.1.1"
-serde = { version = "1.0.89", features = ["derive"] }
+serde = { version = "1.0.90", features = ["derive"] }
 prettytable-rs = "0.8.0"
 num = "0.2.0"
 textwrap = "0.11.0"
@@ -34,12 +34,12 @@ once_cell = "0.1.8"
 chrono = {version="0.4.6", features=["serde"]}
 tokio = {version="0.1.18", features=["async-await-preview"]}
 tokio-process = "0.2.3"
-futures01 = {package="futures",version="0.1.25"}
-futures-preview = {version="0.3.0-alpha.13", features=["compat", "io-compat"]}
+futures01 = {package="futures",version="0.1.26"}
+futures-preview = {version="0.3.0-alpha.14", features=["compat", "io-compat"]}
 tarpc = {git="https://github.com/elbaro/tarpc.git", features=["serde1"], branch="transport-patch"}
 tarpc-bincode-transport = {git="https://github.com/elbaro/tarpc.git", branch="transport-patch"}
-tokio-async-await = "0.1.6"
-yamux = "0.1.9"
+# tokio-async-await = "0.1.6"
+yamux = "0.2.0"
 pin-utils = "0.1.0-alpha.4"
 slog-scope = "4.1.1"
 native-tls = "0.2.2"
