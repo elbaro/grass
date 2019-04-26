@@ -1,6 +1,9 @@
 use clap::{App, AppSettings, Arg, ArgGroup, SubCommand};
 // use indoc::indoc;
 
+pub mod show;
+mod tui_events;
+
 clap::arg_enum! {
 	#[derive(Debug)]
 	enum Database {
@@ -9,9 +12,16 @@ clap::arg_enum! {
 	}
 }
 
+lazy_static::lazy_static! {
+    static ref version: String = {
+		format!("{} ({} {}) {}", clap::crate_version!(), env!("VERGEN_COMMIT_DATE"), env!("VERGEN_SHA_SHORT"), env!("VERGEN_TARGET_TRIPLE"))
+	};
+}
+
 pub fn build_cli() -> App<'static, 'static> {
+	let version2:&str = &version;
 	App::new("grass")
-		.version(clap::crate_version!())
+		.version(version2)
 		.author("github.com/elbaro/grass")
 		.about("GRES job scheduler")
 		.setting(AppSettings::SubcommandRequiredElseHelp)

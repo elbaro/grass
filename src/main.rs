@@ -8,8 +8,7 @@
 #[macro_use]
 extern crate clap;
 
-use colored::*;
-use prettytable::{cell, color, row, Attr, Cell, Row, Table};
+
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn};
 use std::net::SocketAddr;
@@ -200,10 +199,6 @@ fn main() {
 			//     [queue: 2]
 			//         [running jobs]
 
-			if matches.is_present("interactive") {
-				// interactive::show().unwrap();
-				return;
-			}
 
 			let broker_addr: SocketAddr = matches
 				.value_of("broker")
@@ -211,155 +206,7 @@ fn main() {
 				.parse()
 				.expect("broker address should be ip:port");
 
-			compat::tokio_run(
-				async move {
-					{
-						println!("{}", "[Daemon]".bold());
-
-						let mut client = await!(daemon::new_daemon_client()).unwrap();
-						let info = await!(client.info(context::current())).unwrap();
-						if info.broker {
-							println!("Broker: Running");
-						} else {
-							println!("Broker: -");
-						}
-						if let Some(worker) = info.worker.as_ref() {
-							println!("Worker: {}", worker.broker_addr);
-						} else {
-							println!("Worker: -");
-						}
-					}
-
-					// broker
-					{
-						let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
-						let info = await!(client.info(context::current())).unwrap();
-						println!("{}", format!("[Broker @ {:?}]", &info.bind_addr).bold());
-
-						{
-							use chrono::TimeZone;
-							// workers
-							let mut table = Table::new();
-							table.add_row(row![
-								"hostname", "os", "uptime",
-								// "heartbeat",
-								// "load",
-								"queues"
-							]);
-							for worker in &info.workers {
-								table.add_row(row![
-									worker.node_spec.hostname,
-									format!(
-										"{} ({})",
-										&worker.node_spec.os, worker.node_spec.os_release
-									), // os
-									worker // uptime
-										.node_spec
-										.get_uptime()
-										.to_std()
-										.map(|d| timeago::Formatter::new().convert(d))
-										.unwrap_or("time sync mismatch".to_string()),
-									worker
-										.queue_infos
-										.iter() // queues
-										.map(|q_info| format!(
-											"{} ({}? running)",
-											&q_info.name, &q_info.running
-										))
-										.collect::<Vec<_>>()
-										.join(", ")
-								]);
-							}
-							table.printstd();
-							println!();
-						}
-
-						{
-							// queues
-							// let mut table = Table::new();
-							// table.add_row(row![
-							// 	"q_name",
-							// 	"cwd",
-							// 	"cmd",
-							// 	"env",
-							// 	"available",
-							// 	"running"
-							// ]);
-						}
-
-						let mut table = Table::new();
-						table.add_row(row![
-							"created",
-							"queue",
-							"job id",
-							"status",
-							"command",
-							"allocation",
-							"result"
-						]);
-
-						for job in &info.jobs {
-							let cmd: String = job.spec.cmd.join(" ");
-
-							let (status_cell, result) = match &job.status {
-								JobStatus::Pending => (Cell::new("Pending"), "".to_string()),
-								JobStatus::Running { pid } => (
-									Cell::new("Running")
-										.with_style(Attr::ForegroundColor(color::YELLOW)),
-									format!("pid: {}", pid),
-								),
-								JobStatus::Finished {
-									exit_status: Ok(()),
-									..
-								} => (
-									Cell::new("Success")
-										.with_style(Attr::ForegroundColor(color::GREEN)),
-									"-".to_string(),
-								),
-								JobStatus::Finished {
-									exit_status: Err(err),
-									..
-								} => (
-									Cell::new("Failed")
-										.with_style(Attr::ForegroundColor(color::RED)),
-									err.to_string(),
-								),
-							};
-
-							let allocation: String = job
-								.allocation
-								.as_ref()
-								.map(|x| serde_json::to_string(&x).unwrap())
-								.unwrap_or_default();
-
-							// wrap cmd and result
-							let cmd = textwrap::fill(&cmd, 30);
-							let result = textwrap::fill(&result, 20);
-							let allocation = textwrap::fill(&allocation, 20);
-
-							table.add_row(Row::new(vec![
-								Cell::new(
-									&job.created_at
-										.with_timezone(&chrono::Local)
-										.format("%Y-%m-%d %P %l:%M:%S")
-										.to_string(),
-								),
-								Cell::new(&job.spec.q_name),
-								Cell::new(&job.id[..8]),
-								status_cell,
-								Cell::new(&cmd),
-								Cell::new(&allocation),
-								Cell::new(&result),
-							]));
-						}
-
-						if table.is_empty() {
-							println!("no jobs");
-						}
-						table.printstd();
-					}
-				}, // async move
-			); // tokio_run
+			cli::show::run(broker_addr, matches.is_present("interactive")).unwrap();
 		}
 		"daemon" => {
 			// let log = slog_scope::logger();

@@ -151,7 +151,7 @@ impl Daemon {
 
 				Ok(())
 			},
-		);
+		).unwrap();
 		let log = slog_scope::logger();
 		info!(log, "[Daemon] exit");
 	}
