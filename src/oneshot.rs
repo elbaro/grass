@@ -1,8 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-// use futures::lock::Mutex;
-use futures::{task::Waker, Future, FutureExt, Poll, Stream};
+use futures::{task::Context, Future, FutureExt, Poll, Stream};
 
 #[derive(Clone)]
 pub struct OneshotSender<T = ()> {
@@ -59,15 +58,15 @@ impl<T: Stream> StreamExt for T {}
 impl<S: Stream, F: Future<Output = ()>> Stream for TakeUntil<S, F> {
 	type Item = S::Item;
 
-	fn poll_next(mut self: Pin<&mut Self>, waker: &Waker) -> Poll<Option<Self::Item>> {
-		match self.as_mut().until().poll(waker) {
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+		match self.as_mut().until().poll(cx) {
 			Poll::Ready(_) => {
 				// future resolved -- terminate stream
 				return Poll::Ready(None);
 			}
 			Poll::Pending => {}
 		};
-		self.as_mut().stream().poll_next(waker)
+		self.as_mut().stream().poll_next(cx)
 	}
 }
 

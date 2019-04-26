@@ -24,6 +24,7 @@ use futures::{FutureExt, TryFutureExt};
 
 mod broker;
 mod cli;
+// mod show;
 mod compat;
 mod daemon;
 mod logger;
@@ -68,6 +69,8 @@ impl AppConfig {
 }
 
 fn main() {
+	color_backtrace::install();
+
 	let args = cli::build_cli().get_matches();
 	let mut _app_config = AppConfig::load();
 
@@ -197,6 +200,11 @@ fn main() {
 			//     [queue: 2]
 			//         [running jobs]
 
+			if matches.is_present("interactive") {
+				// interactive::show().unwrap();
+				return;
+			}
+
 			let broker_addr: SocketAddr = matches
 				.value_of("broker")
 				.unwrap_or("127.0.0.1:7500")
@@ -255,7 +263,7 @@ fn main() {
 										.queue_infos
 										.iter() // queues
 										.map(|q_info| format!(
-											"{} (? running)",
+											"{} ({}? running)",
 											&q_info.name, &q_info.running
 										))
 										.collect::<Vec<_>>()

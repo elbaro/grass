@@ -86,6 +86,7 @@ pub fn build_cli() -> App<'static, 'static> {
 			SubCommand::with_name("show")
 				.about("Show the job status")
 				// .arg(Arg::with_name("queue").long("queue").takes_value(true))
+				.arg(Arg::with_name("interactive").long("interactive").short("i"))
 				.arg(Arg::with_name("json").long("json"))
 				.arg(Arg::with_name("table").long("table"))
 				.arg(Arg::with_name("broker").long("broker").takes_value(true))
