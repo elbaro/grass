@@ -213,6 +213,58 @@ pub struct Job {
 	pub allocation: Option<Allocation>,
 }
 
+impl Job {
+	pub fn display_columns(&self) -> Vec<String> {
+		use colored::Colorize;
+
+		let (status, result) = match &self.status {
+			JobStatus::Pending => ("Pending".to_string(), "".to_string()),
+			JobStatus::Running { pid } => (
+				"Running".yellow().to_string(),
+				format!("pid: {}", pid),
+			),
+			JobStatus::Finished {
+				exit_status: Ok(()),
+				..
+			} => (
+				"Success".green().to_string(),
+				"-".to_string(),
+			),
+			JobStatus::Finished {
+				exit_status: Err(err),
+				..
+			} => (
+				"Failed".red().to_string(),
+				err.to_string(),
+			),
+		};
+
+		let allocation: String = self
+			.allocation
+			.as_ref()
+			.map(|x| serde_json::to_string(&x).unwrap())
+			.unwrap_or_default();
+
+		// wrap cmd and result
+		let cmd = textwrap::fill(&self.spec.cmd.join(" "), 30);
+		let result = textwrap::fill(&result, 20);
+		let allocation = textwrap::fill(&allocation, 20);
+
+		vec![
+			self.created_at
+				.with_timezone(&chrono::Local)
+				.format("%Y-%m-%d %P %l:%M:%S")
+				.to_string(),
+			self.spec.q_name.clone(),
+			(&self.id[..8]).to_string(),
+			status,
+			cmd,
+			allocation,
+			result,
+		]
+	}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobSpecification {
 	pub q_name: String,

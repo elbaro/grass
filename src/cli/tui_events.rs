@@ -1,7 +1,7 @@
 // https://raw.githubusercontent.com/fdehau/tui-rs/0168442c224bd3cd23f1d2b6494dd236b556a124/examples/util/event.rs
 
 use std::io;
-use std::sync::mpsc;
+use std::sync::{mpsc, atomic::AtomicBool};
 use std::thread;
 
 use termion::event::Key;
@@ -29,9 +29,6 @@ impl Events {
                     match evt {
                         Ok(key) => {
                             if let Err(_) = tx.send(Event::Input(key)) {
-                                return;
-                            }
-                            if key == Key::Char('q') || key == Key::Esc {
                                 return;
                             }
                         }

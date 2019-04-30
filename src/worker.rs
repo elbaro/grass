@@ -473,4 +473,26 @@ impl WorkerInfo {
 			queue_infos: q_infos,
 		}
 	}
+
+	pub fn display_columns(&self) -> Vec<String> {
+		vec![
+			self.node_spec.hostname.clone(),
+			format!("{} ({})", self.node_spec.os, self.node_spec.os_release),
+			self
+				.node_spec
+				.get_uptime()
+				.to_std()
+				.map(|d| timeago::Formatter::new().convert(d))
+				.unwrap_or("time sync mismatch".to_string()),
+			self
+				.queue_infos
+				.iter() // queues
+				.map(|q_info| format!(
+					"{} ({}? running)",
+					&q_info.name, &q_info.running
+				))
+				.collect::<Vec<_>>()
+				.join(", ")
+		]
+	}
 }
