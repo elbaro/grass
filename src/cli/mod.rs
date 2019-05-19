@@ -48,7 +48,8 @@ pub fn build_cli() -> App<'static, 'static> {
 				.about("Create a queue on the local worker (via daemon)")
 				.arg(Arg::with_name("name").index(1).required(true))
 				.arg(Arg::with_name("cwd").long("cwd").takes_value(true))
-				.arg(Arg::with_name("cmd").multiple(true).required(true))
+				.arg(Arg::with_name("cmd").multiple(true))
+				.arg(Arg::with_name("unsecure"))
 				.arg(
 					Arg::with_name("env")
 						.short("e")

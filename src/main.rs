@@ -269,6 +269,11 @@ fn main() {
 				.unwrap()
 				.map(str::to_string)
 				.collect();
+
+			if cmd.len()==0 && !matches.is_present("unsecure") {
+				panic!("This queue can run arbitrary commands. If you understood the risk, add --unsecure.");
+			}
+
 			let envs: Vec<(String, String)> = matches
 				.values_of("env")
 				.map(|x| {
