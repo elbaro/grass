@@ -13,6 +13,7 @@ use futures::compat::Future01CompatExt;
 use futures::compat::Stream01CompatExt;
 use futures::lock::Mutex;
 use futures::{future::Ready, Future, FutureExt, Stream, StreamExt, TryFutureExt};
+
 use futures01::stream::Stream as Stream01;
 use futures01::Future as Future01;
 
@@ -98,7 +99,7 @@ impl Broker {
 						stream,
 						yamux::Config::default(),
 						yamux::Mode::Server,
-					);
+					).compat();
 					let stream = await!(mux.next())
 						.ok_or(failure::err_msg("cannot open mux"))?
 						.context("cannot open mux")?;

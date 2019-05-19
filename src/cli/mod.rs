@@ -13,13 +13,13 @@ clap::arg_enum! {
 }
 
 lazy_static::lazy_static! {
-    static ref version: String = {
+	static ref VERSION: String = {
 		format!("{} ({} {}) {}", clap::crate_version!(), env!("VERGEN_COMMIT_DATE"), env!("VERGEN_SHA_SHORT"), env!("VERGEN_TARGET_TRIPLE"))
 	};
 }
 
 pub fn build_cli() -> App<'static, 'static> {
-	let version2:&str = &version;
+	let version2: &str = &VERSION;
 	App::new("grass")
 		.version(version2)
 		.author("github.com/elbaro/grass")
@@ -49,7 +49,7 @@ pub fn build_cli() -> App<'static, 'static> {
 				.arg(Arg::with_name("name").index(1).required(true))
 				.arg(Arg::with_name("cwd").long("cwd").takes_value(true))
 				.arg(Arg::with_name("cmd").multiple(true))
-				.arg(Arg::with_name("unsecure"))
+				.arg(Arg::with_name("unsecure").long("unsecure"))
 				.arg(
 					Arg::with_name("env")
 						.short("e")
@@ -119,6 +119,10 @@ pub fn build_cli() -> App<'static, 'static> {
 				.group(ArgGroup::with_name("broker").args(&["bind", "no-broker"]))
 				.group(ArgGroup::with_name("worker").args(&["connect", "no-worker"]))
 				.arg(Arg::with_name("cert").long("cert").takes_value(true))
-				.arg(Arg::with_name("cert-pass").long("cert-pass").takes_value(true))
+				.arg(
+					Arg::with_name("cert-pass")
+						.long("cert-pass")
+						.takes_value(true),
+				),
 		)
 }

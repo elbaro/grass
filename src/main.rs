@@ -1,5 +1,5 @@
 #![recursion_limit = "128"]
-#![feature(await_macro, async_await, futures_api)]
+#![feature(await_macro, async_await)]
 #![feature(try_blocks, arbitrary_self_types, type_ascription)]
 #![feature(label_break_value)]
 #![feature(associated_type_defaults, proc_macro_hygiene)]
@@ -118,14 +118,12 @@ fn main() {
 		"stop" => {
 			info!(log, "[Command] Stopping a local daemon.");
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
-			compat::tokio_run(
-				async move {
-					let mut client = await!(daemon::new_daemon_client()).unwrap();
-					info!(log, "Stopping.");
-					await!(client.stop(context::current())).unwrap();
-					info!(log, "Done.");
-				},
-			);
+			compat::tokio_run(async move {
+				let mut client = await!(daemon::new_daemon_client()).unwrap();
+				info!(log, "Stopping.");
+				await!(client.stop(context::current())).unwrap();
+				info!(log, "Done.");
+			});
 		}
 		"enqueue" => 'e: {
 			// grass enqueue --cwd . --req "{gpu:1}" -- python train.py ..
@@ -167,14 +165,12 @@ fn main() {
 				require: req,
 			};
 
-			compat::tokio_run(
-				async move {
-					let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
-					info!(log, "Enqueueing."; "job_spec" => ?job_spec);
-					await!(client.job_enqueue(context::current(), job_spec)).unwrap();
-					info!(log, "Enqueued");
-				},
-			);
+			compat::tokio_run(async move {
+				let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
+				info!(log, "Enqueueing."; "job_spec" => ?job_spec);
+				await!(client.job_enqueue(context::current(), job_spec)).unwrap();
+				info!(log, "Enqueued");
+			});
 		}
 		"show" => {
 			// output example:
@@ -264,13 +260,14 @@ fn main() {
 			}
 			.unwrap();
 
-			let cmd: Vec<String> = matches
-				.values_of("cmd")
-				.unwrap()
-				.map(str::to_string)
-				.collect();
+			let cmd: Vec<String> = if let Some(iter) = matches.values_of("cmd") {
+				iter.map(str::to_string).collect()
+			} else {
+				Vec::new()
+			};
+;
 
-			if cmd.len()==0 && !matches.is_present("unsecure") {
+			if cmd.len() == 0 && !matches.is_present("unsecure") {
 				panic!("This queue can run arbitrary commands. If you understood the risk, add --unsecure.");
 			}
 
@@ -303,24 +300,20 @@ fn main() {
 			};
 
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
-			compat::tokio_run(
-				async move {
-					let mut client = await!(daemon::new_daemon_client()).unwrap();
-					await!(client.create_queue(context::current(), config)).unwrap();
-					info!(log, "Done");
-				},
-			);
+			compat::tokio_run(async move {
+				let mut client = await!(daemon::new_daemon_client()).unwrap();
+				await!(client.create_queue(context::current(), config)).unwrap();
+				info!(log, "Done");
+			});
 		}
 		"delete-queue" => {
 			let name = matches.value_of("name").unwrap().to_string();
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
-			compat::tokio_run(
-				async move {
-					let mut client = await!(daemon::new_daemon_client()).unwrap();
-					await!(client.delete_queue(context::current(), name)).unwrap();
-					info!(log, "Done");
-				},
-			);
+			compat::tokio_run(async move {
+				let mut client = await!(daemon::new_daemon_client()).unwrap();
+				await!(client.delete_queue(context::current(), name)).unwrap();
+				info!(log, "Done");
+			});
 		}
 		"dashboard" => unimplemented!(),
 		_ => unreachable!(),
