@@ -1,4 +1,4 @@
-use crate::objects::{Job, JobSpecification, JobStatus, QueueCapacity};
+use crate::objects::{Job, JobSpecification, JobStatus, WorkerCapacity};
 use crate::worker::{WorkerInfo, QueueInfo};
 
 use std::collections::{BTreeSet, HashMap};
@@ -53,7 +53,7 @@ impl BrokerConfig {
 tarpc::service! {
 	rpc ping();
 	rpc job_update(job_id: String, status: JobStatus);
-	rpc job_request(q_name: String, capacity: QueueCapacity) -> Option<Job>;
+	rpc job_request(q_name: String, capacity: WorkerCapacity) -> Option<Job>;
 	rpc job_enqueue(spec: JobSpecification);
 	// rpc job_enqueue(spec: String);
 	rpc info() -> BrokerInfo;
@@ -239,7 +239,7 @@ impl Service for BrokerRPCServerImpl {
 		self,
 		_: context::Context,
 		q_name: String,
-		capacity: QueueCapacity,
+		capacity: WorkerCapacity,
 	) -> Self::JobRequestFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] job_request()"; "q"=>&q_name, "capacity"=>?capacity);

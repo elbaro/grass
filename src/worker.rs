@@ -1,4 +1,4 @@
-use crate::objects::{Job, JobStatus, QueueCapacity};
+use crate::objects::{Job, JobStatus, WorkerCapacity};
 #[allow(unused_imports)]
 use slog::{error, info};
 use std::collections::BTreeMap;
@@ -29,17 +29,23 @@ enum Message {
 
 pub struct WorkerConfig {
 	pub broker_addr: SocketAddr,
+	pub capacity: WorkerCapacity,
 }
 
 impl WorkerConfig {
 	pub fn build(self, stop_flag: crate::oneshot::OneshotFlag<()>) -> Worker {
 		let (sender, receiver) = futures::channel::mpsc::unbounded();
+		let available = Mutex::new(self.capacity.clone());
+
 		Worker {
 			inner: Arc::new(WorkerInner {
 				broker_addr: self.broker_addr,
 				sender,
 				queues: Default::default(),
 				stop_flag,
+
+				capacity: self.capacity,
+				available,
 			}),
 			receiver: Mutex::new(receiver),
 		}
@@ -89,6 +95,8 @@ pub struct WorkerInner {
 	sender: UnboundedSender<Message>,
 	queues: Mutex<BTreeMap<String, Arc<Queue>>>,
 	stop_flag: crate::oneshot::OneshotFlag<()>,
+	capacity: WorkerCapacity,
+	available: Mutex<WorkerCapacity>,
 }
 
 impl Worker {
@@ -163,9 +171,8 @@ impl Worker {
 						Message::TrySchedule => {
 							info!(log, "[Worker] msg: TrySchedule; JobRequest");
 							let queues = await!(inner.queues.lock());
+							let mut available = await!(inner.available.lock());
 							for (q_name, q) in queues.iter() {
-								let mut available = await!(q.available.lock());
-
 								if let Some(job) = await!(client.job_request(
 									context::current(),
 									q_name.to_string(),
@@ -181,7 +188,7 @@ impl Worker {
 									// spawn, consume
 									let q = q.clone();
 									crate::compat::tokio_spawn(
-										q.spawn_job(job, inner.sender.clone()),
+										inner.clone().spawn_job(q, job, inner.sender.clone()),
 									);
 								}
 							}
@@ -220,93 +227,18 @@ impl Worker {
 	}
 }
 
-impl WorkerInner {}
-
-// instance per worker connection
-#[derive(Clone)]
-struct WorkerRPCServerImpl {
-	worker: Arc<WorkerInner>,
-	client: crate::broker::Client, // Clone-able
-}
-
-impl Service for WorkerRPCServerImpl {
-	type OnNewJobFut = Ready<()>;
-	fn on_new_job(self, _: context::Context) -> Self::OnNewJobFut {
-		let log = slog_scope::logger();
-		info!(log, "[Worker] on_new_job()");
-		self.worker
-			.sender
-			.unbounded_send(Message::TrySchedule)
-			.unwrap();
-		// possible that msg is processed before the end of this call
-		// broker calls on_new_job() -> worker schedule msg -> worker calls job_request
-		// concurrent call on_new_job() -> worker
-		futures::future::ready(())
-	}
-
-	type StatusFut = Ready<String>;
-	fn status(self, _: context::Context) -> Self::StatusFut {
-		let log = slog_scope::logger();
-		info!(log, "[Worker] status()");
-		futures::future::ready("[dummy status]".to_string())
-	}
-
-	type InfoFut = std::pin::Pin<Box<dyn Future<Output = WorkerInfo> + Send>>;
-	fn info(self, _: context::Context) -> Self::InfoFut {
-		Box::pin(async move { await!(WorkerInfo::from(self.worker.clone())) })
-	}
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct QueueConfig {
-	pub name: String,
-	pub cwd: PathBuf,
-	pub cmd: Vec<String>,
-	pub envs: Vec<(String, String)>,
-	pub capacity: QueueCapacity,
-}
-
-impl QueueConfig {
-	pub fn build(self) -> Queue {
-		let available = Mutex::new(self.capacity.clone());
-		Queue {
-			name: self.name,
-			cwd: self.cwd,
-			cmd: self.cmd,
-			envs: self.envs,
-			capacity: self.capacity,
-			available,
-			jobs: Default::default(),
-			running: Default::default(),
-		}
-	}
-}
-
-pub struct Queue {
-	pub name: String,
-	pub cwd: PathBuf,
-	pub cmd: Vec<String>,
-	pub envs: Vec<(String, String)>,
-	pub capacity: QueueCapacity,
-	pub available: Mutex<QueueCapacity>,
-	jobs: Mutex<BTreeMap<String, Job>>,
-
-	// stats
-	pub running: std::sync::atomic::AtomicU32,
-}
-
-impl Queue {
-	async fn spawn_job(self: Arc<Self>, job: Job, sender: UnboundedSender<Message>) {
+impl WorkerInner {
+	async fn spawn_job(self: Arc<Self>, q: Arc<Queue>, job: Job, sender: UnboundedSender<Message>) {
 		use std::process::ExitStatus;
 		use std::process::Stdio;
 
 		let job_id = job.id.clone();
 		let sender_ = sender.clone();
 		let job_ = job.clone();
-		let cmd = self.cmd.clone();
-		let envs = self.envs.clone();
-		let cwd = self.cwd.clone();
-		self.running
+		let cmd = q.cmd.clone();
+		let envs = q.envs.clone();
+		let cwd = q.cwd.clone();
+		q.running
 			.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 		let result: Result<ExitStatus, failure::Error> = await!(
 			async move {
@@ -381,7 +313,7 @@ impl Queue {
 			available.restore(&job);
 		}
 
-		self.running
+		q.running
 			.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
 		sender
@@ -394,6 +326,76 @@ impl Queue {
 			})
 			.unwrap();
 	}
+}
+
+// instance per worker connection
+#[derive(Clone)]
+struct WorkerRPCServerImpl {
+	worker: Arc<WorkerInner>,
+	client: crate::broker::Client, // Clone-able
+}
+
+impl Service for WorkerRPCServerImpl {
+	type OnNewJobFut = Ready<()>;
+	fn on_new_job(self, _: context::Context) -> Self::OnNewJobFut {
+		let log = slog_scope::logger();
+		info!(log, "[Worker] on_new_job()");
+		self.worker
+			.sender
+			.unbounded_send(Message::TrySchedule)
+			.unwrap();
+		// possible that msg is processed before the end of this call
+		// broker calls on_new_job() -> worker schedule msg -> worker calls job_request
+		// concurrent call on_new_job() -> worker
+		futures::future::ready(())
+	}
+
+	type StatusFut = Ready<String>;
+	fn status(self, _: context::Context) -> Self::StatusFut {
+		let log = slog_scope::logger();
+		info!(log, "[Worker] status()");
+		futures::future::ready("[dummy status]".to_string())
+	}
+
+	type InfoFut = std::pin::Pin<Box<dyn Future<Output = WorkerInfo> + Send>>;
+	fn info(self, _: context::Context) -> Self::InfoFut {
+		Box::pin(async move { await!(WorkerInfo::from(self.worker.clone())) })
+	}
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueueConfig {
+	pub name: String,
+	pub cwd: PathBuf,
+	pub cmd: Vec<String>,
+	pub envs: Vec<(String, String)>,
+}
+
+impl QueueConfig {
+	pub fn build(self) -> Queue {
+		Queue {
+			name: self.name,
+			cwd: self.cwd,
+			cmd: self.cmd,
+			envs: self.envs,
+			jobs: Default::default(),
+			running: Default::default(),
+		}
+	}
+}
+
+pub struct Queue {
+	pub name: String,
+	pub cwd: PathBuf,
+	pub cmd: Vec<String>,
+	pub envs: Vec<(String, String)>,
+	jobs: Mutex<BTreeMap<String, Job>>,
+
+	// stats
+	pub running: std::sync::atomic::AtomicU32,
+}
+
+impl Queue {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -426,19 +428,13 @@ pub struct QueueInfo {
 	pub name: String,
 	pub running: u32,
 	// pending: usize,
-	pub capacity: QueueCapacity,
-	pub available: QueueCapacity,
 }
 
 impl QueueInfo {
 	async fn from(q: &Queue) -> QueueInfo {
-		let available = await!(q.available.lock()).clone();
 		QueueInfo {
 			name: q.name.clone(),
-			capacity: q.capacity.clone(),
-			available: available,
 			running: q.running.load(std::sync::atomic::Ordering::SeqCst),
-			// pending: 0,
 		}
 	}
 
@@ -460,6 +456,8 @@ pub struct WorkerInfo {
 	// dynamic
 	pub queue_infos: Vec<QueueInfo>,
 	// pub state: WorkerState, // cpu load, running job num, ..
+
+	pub available: WorkerCapacity,
 }
 
 impl WorkerInfo {
@@ -467,10 +465,13 @@ impl WorkerInfo {
 		let queues = await!(worker.queues.lock());
 		let q_infos = await!(QueueInfo::vec_from_queues(&queues));
 
+		let available = await!(worker.available.lock()).clone();
+
 		WorkerInfo {
 			broker_addr: worker.broker_addr.clone(),
 			node_spec: WorkerNodeSpec::new(),
 			queue_infos: q_infos,
+			available,
 		}
 	}
 

@@ -31,7 +31,7 @@ mod objects;
 mod oneshot;
 mod rpc;
 mod worker;
-use objects::{Job, JobSpecification, JobStatus, QueueCapacity, ResourceRequirement};
+use objects::{Job, JobSpecification, JobStatus, WorkerCapacity, ResourceRequirement};
 use worker::QueueConfig;
 
 use app_dirs::{get_app_root, AppInfo};
@@ -108,7 +108,7 @@ fn main() {
 
 			// validate
 			if let Some(resources) = matches.value_of("resources") {
-				let _: QueueCapacity =
+				let _: WorkerCapacity =
 					json5::from_str(resources).expect("fail to parse arg resources");
 				cmd.arg("--resources").arg(resources);
 			}
@@ -229,6 +229,11 @@ fn main() {
 				})
 			};
 
+			let capacity: WorkerCapacity = matches
+				.value_of("capacity")
+				.map(|j| WorkerCapacity::from_json_str(&j).expect("invalid json5"))
+				.unwrap_or_default();
+
 			let worker_config = if matches.is_present("no-worker") {
 				None
 			} else {
@@ -238,6 +243,7 @@ fn main() {
 						.unwrap_or("127.0.0.1:7500")
 						.parse()
 						.expect("fail to parse --connect address"),
+					capacity,
 				})
 			};
 
@@ -286,17 +292,11 @@ fn main() {
 				})
 				.unwrap_or_default();
 
-			let capacity: QueueCapacity = matches
-				.value_of("capacity")
-				.map(|j| QueueCapacity::from_json_str(&j).expect("invalid json5"))
-				.unwrap_or_default();
-
 			let config = QueueConfig {
 				name: matches.value_of("name").unwrap().to_string(),
 				cwd,
 				cmd,
 				envs,
-				capacity,
 			};
 
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());

@@ -1,5 +1,5 @@
 use crate::broker::{Broker, BrokerConfig};
-use crate::objects::QueueCapacity;
+use crate::objects::WorkerCapacity;
 use crate::worker::{QueueConfig, Worker, WorkerConfig};
 
 use std::net::SocketAddr;

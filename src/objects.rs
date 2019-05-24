@@ -30,12 +30,12 @@ pub struct ResourceTypeCapacity(pub HashMap<String, f64>);
 pub struct ResourceRequirement(pub HashMap<String, f64>);
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct QueueCapacity(pub HashMap<String, ResourceTypeCapacity>);
+pub struct WorkerCapacity(pub HashMap<String, ResourceTypeCapacity>);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Allocation(pub HashMap<String, String>);
 
-impl QueueCapacity {
+impl WorkerCapacity {
 	pub fn can_run_job(&self, req: &ResourceRequirement) -> Option<Allocation> {
 		let mut allocation = Allocation(HashMap::<String, String>::new());
 		let chk = req.0.iter().all(|(res_type, amount)| {
@@ -95,11 +95,11 @@ impl QueueCapacity {
 use std::sync::RwLock;
 struct JobRunningGuard {
 	job: Job,
-	worker_capacity: RwLock<QueueCapacity>,
+	worker_capacity: RwLock<WorkerCapacity>,
 }
 
 impl JobRunningGuard {
-	fn new(job: Job, worker_capacity: RwLock<QueueCapacity>) -> JobRunningGuard {
+	fn new(job: Job, worker_capacity: RwLock<WorkerCapacity>) -> JobRunningGuard {
 		{
 			let mut cap = worker_capacity.write().unwrap();
 			cap.consume(&job);
@@ -122,8 +122,8 @@ impl Drop for JobRunningGuard {
 	}
 }
 
-impl QueueCapacity {
-	pub fn from_json_str(s: &str) -> Result<QueueCapacity, &'static str> {
+impl WorkerCapacity {
+	pub fn from_json_str(s: &str) -> Result<WorkerCapacity, &'static str> {
 		let value: serde_json::Value = json5::from_str(s).map_err(|_| "invalid json5")?;
 		let value = value.as_object().expect("root json is not an object");
 
@@ -185,7 +185,7 @@ impl QueueCapacity {
 
 			cap.insert(res_type.to_string(), parsed);
 		}
-		Ok(QueueCapacity(cap))
+		Ok(WorkerCapacity(cap))
 	}
 }
 

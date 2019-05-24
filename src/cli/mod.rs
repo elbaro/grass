@@ -57,11 +57,6 @@ pub fn build_cli() -> App<'static, 'static> {
 						.multiple(true)
 						.takes_value(true),
 				)
-				.arg(
-					Arg::with_name("capacity")
-						.long("capacity")
-						.takes_value(true),
-				)
 				.setting(AppSettings::TrailingVarArg),
 		)
 		.subcommand(
@@ -118,6 +113,11 @@ pub fn build_cli() -> App<'static, 'static> {
 				.arg(Arg::with_name("no-worker").long("no-worker"))
 				.group(ArgGroup::with_name("broker").args(&["bind", "no-broker"]))
 				.group(ArgGroup::with_name("worker").args(&["connect", "no-worker"]))
+				.arg(
+					Arg::with_name("capacity")
+						.long("capacity")
+						.takes_value(true),
+				)
 				.arg(Arg::with_name("cert").long("cert").takes_value(true))
 				.arg(
 					Arg::with_name("cert-pass")
