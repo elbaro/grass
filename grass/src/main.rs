@@ -8,7 +8,6 @@
 #[macro_use]
 extern crate clap;
 
-
 #[allow(unused_imports)]
 use slog::{error, info, o, trace, warn};
 use std::net::SocketAddr;
@@ -119,9 +118,9 @@ fn main() {
 			info!(log, "[Command] Stopping a local daemon.");
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
 			compat::tokio_run(async move {
-				let mut client = await!(daemon::new_daemon_client()).unwrap();
+				let mut client = daemon::new_daemon_client().await.unwrap();
 				info!(log, "Stopping.");
-				await!(client.stop(context::current())).unwrap();
+				client.stop(context::current()).await.unwrap();
 				info!(log, "Done.");
 			});
 		}
@@ -166,9 +165,12 @@ fn main() {
 			};
 
 			compat::tokio_run(async move {
-				let mut client = await!(broker::new_broker_client(broker_addr)).unwrap();
+				let mut client = broker::new_broker_client(broker_addr).await.unwrap();
 				info!(log, "Enqueueing."; "job_spec" => ?job_spec);
-				await!(client.job_enqueue(context::current(), job_spec)).unwrap();
+				client
+					.job_enqueue(context::current(), job_spec)
+					.await
+					.unwrap();
 				info!(log, "Enqueued");
 			});
 		}
@@ -194,7 +196,6 @@ fn main() {
 			//         [running jobs]
 			//     [queue: 2]
 			//         [running jobs]
-
 
 			let broker_addr: SocketAddr = matches
 				.value_of("broker")
@@ -301,8 +302,11 @@ fn main() {
 
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
 			compat::tokio_run(async move {
-				let mut client = await!(daemon::new_daemon_client()).unwrap();
-				await!(client.create_queue(context::current(), config)).unwrap();
+				let mut client = daemon::new_daemon_client().await.unwrap();
+				client
+					.create_queue(context::current(), config)
+					.await
+					.unwrap();
 				info!(log, "Done");
 			});
 		}
@@ -310,8 +314,8 @@ fn main() {
 			let name = matches.value_of("name").unwrap().to_string();
 			tarpc::init(tokio::executor::DefaultExecutor::current().compat());
 			compat::tokio_run(async move {
-				let mut client = await!(daemon::new_daemon_client()).unwrap();
-				await!(client.delete_queue(context::current(), name)).unwrap();
+				let mut client = daemon::new_daemon_client().await.unwrap();
+				client.delete_queue(context::current(), name).await.unwrap();
 				info!(log, "Done");
 			});
 		}

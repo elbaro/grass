@@ -73,7 +73,7 @@ pub struct Worker {
 
 impl Worker {
 	pub async fn create_queue(&self, config: QueueConfig) {
-		let mut queues = await!(self.inner.queues.lock());
+		let mut queues = self.inner.queues.lock().await;
 		queues.insert(config.name.clone(), Arc::new(config.build()));
 		self.inner
 			.sender
@@ -81,7 +81,7 @@ impl Worker {
 			.expect("cannot enqueue worker msg");
 	}
 	pub async fn delete_queue(&self, name: String) {
-		let mut queues = await!(self.inner.queues.lock());
+		let mut queues = self.inner.queues.lock().await;
 		queues.remove(&name);
 		self.inner
 			.sender
@@ -104,7 +104,7 @@ impl Worker {
 		let log = slog_scope::logger();
 
 		info!(log, "[Worker] Connecting"; "broker_addr"=>&self.inner.broker_addr);
-		let stream = await!(TcpStream::connect(&self.inner.broker_addr).compat())
+		let stream = TcpStream::connect(&self.inner.broker_addr).compat().await
 			.context("Couldn't connect to broker")?;
 
 		let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
@@ -115,12 +115,12 @@ impl Worker {
 			.context("[Worker] cannot open mux")?
 			.ok_or(failure::err_msg("[Worker] cannot open mux"))?; // client
 		let transport = tarpc_bincode_transport::new(stream);
-		let mut client = await!(crate::broker::new_stub(
+		let mut client = crate::broker::new_stub(
 			tarpc::client::Config::default(),
 			transport
-		))
+		).await
 		.context("cannot establish tarpc_bincode")?;
-		await!(client.ping(context::current()))
+		client.ping(context::current()).await
 			.context("test ping from worker to broker failed")?;
 
 		// server
@@ -149,63 +149,63 @@ impl Worker {
 			.unbounded_send(Message::TrySchedule)
 			.context("cannot enqueue worker msg q")?; // fetch jobs on start
 
-		let mut receiver = await!(self.receiver.lock());
+		let mut receiver = self.receiver.lock().await;
 		let log_move = log.clone();
-		let mut msg_process = Box::pin(
-			async move {
-				let log = log_move;
-				while let Some(msg) = await!(receiver.next()) {
-					match msg {
-						Message::JobUpdate { job_id, status } => {
-							info!(log, "[Worker] sending JobUpdate"; "job_id"=>&job_id, "status"=>?status);
+		let mut msg_process = Box::pin(async move {
+			let log = log_move;
+			while let Some(msg) = receiver.next().await {
+				match msg {
+					Message::JobUpdate { job_id, status } => {
+						info!(log, "[Worker] sending JobUpdate"; "job_id"=>&job_id, "status"=>?status);
 
-							if let JobStatus::Finished { .. } = status {
-								inner
-									.sender
-									.unbounded_send(Message::TrySchedule)
-									.context("cannot enqueue msg")?;
-							}
-							await!(client.job_update(context::current(), job_id, status))
-								.context("cannot call job_update()")?;
+						if let JobStatus::Finished { .. } = status {
+							inner
+								.sender
+								.unbounded_send(Message::TrySchedule)
+								.context("cannot enqueue msg")?;
 						}
-						Message::TrySchedule => {
-							info!(log, "[Worker] msg: TrySchedule; JobRequest");
-							let queues = await!(inner.queues.lock());
-							let mut available = await!(inner.available.lock());
-							for (q_name, q) in queues.iter() {
-								if let Some(job) = await!(client.job_request(
-									context::current(),
-									q_name.to_string(),
-									available.clone()
-								))
-								.expect("[Worker] broker_client.job_request)_ failed")
-								{
-									info!(log, "[Worker] received new job");
-									// register job
-									await!(q.jobs.lock()).insert(job.id.clone(), job.clone());
+						client.job_update(context::current(), job_id, status).await
+							.context("cannot call job_update()")?;
+					}
+					Message::TrySchedule => {
+						info!(log, "[Worker] msg: TrySchedule; JobRequest");
+						let queues = inner.queues.lock().await;
+						let mut available = inner.available.lock().await;
+						for (q_name, q) in queues.iter() {
+							if let Some(job) = client.job_request(
+								context::current(),
+								q_name.to_string(),
+								available.clone()
+							).await
+							.expect("[Worker] broker_client.job_request)_ failed")
+							{
+								info!(log, "[Worker] received new job");
+								// register job
+								q.jobs.lock().await.insert(job.id.clone(), job.clone());
 
-									available.consume(&job);
-									// spawn, consume
-									let q = q.clone();
-									crate::compat::tokio_spawn(
-										inner.clone().spawn_job(q, job, inner.sender.clone()),
-									);
-								}
+								available.consume(&job);
+								// spawn, consume
+								let q = q.clone();
+								crate::compat::tokio_spawn(inner.clone().spawn_job(
+									q,
+									job,
+									inner.sender.clone(),
+								));
 							}
 						}
-						Message::SendQueueInfos => {
-							// send queue info
-							let queues = await!(inner.queues.lock());
-							let q_infos = await!(QueueInfo::vec_from_queues(&queues));
-							info!(log, "[Worker] msg: SendQueueInfos");
-							await!(client.update_worker_state(context::current(), q_infos))
-								.context("[Worker] fail update_worker_state()")?;
-						}
-					};
-				}
-				Result::<(), failure::Error>::Ok(())
-			},
-		)
+					}
+					Message::SendQueueInfos => {
+						// send queue info
+						let queues = inner.queues.lock().await;
+						let q_infos = QueueInfo::vec_from_queues(&queues).await;
+						info!(log, "[Worker] msg: SendQueueInfos");
+						client.update_worker_state(context::current(), q_infos).await
+							.context("[Worker] fail update_worker_state()")?;
+					}
+				};
+			}
+			Result::<(), failure::Error>::Ok(())
+		})
 		.fuse();
 
 		let log = log.clone();
@@ -238,61 +238,58 @@ impl WorkerInner {
 		let cmd = q.cmd.clone();
 		let envs = q.envs.clone();
 		let cwd = q.cwd.clone();
-		q.running
-			.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-		let result: Result<ExitStatus, failure::Error> = await!(
-			async move {
-				let sender = sender_;
-				let mut job = job_;
-				// TODO: lock
-				job.status = JobStatus::Running { pid: 0 };
-				let allocation = &job
-					.allocation
-					.as_ref()
-					.ok_or(failure::err_msg("spawning job with no allocation"))?;
+		q.running.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+		let result: Result<ExitStatus, failure::Error> = async move {
+			let sender = sender_;
+			let mut job = job_;
+			// TODO: lock
+			job.status = JobStatus::Running { pid: 0 };
+			let allocation = &job
+				.allocation
+				.as_ref()
+				.ok_or(failure::err_msg("spawning job with no allocation"))?;
 
-				let cmd = [&cmd[..], &job.spec.cmd[..]].concat();
-				let envs = [&envs[..], &job.spec.envs[..]].concat();
+			let cmd = [&cmd[..], &job.spec.cmd[..]].concat();
+			let envs = [&envs[..], &job.spec.envs[..]].concat();
 
-				let child = std::process::Command::new(&cmd[0])
-					.args(
-						cmd[1..]
-							.iter()
-							.map(|x| -> Result<String, failure::Error> {
-								Ok(strfmt::strfmt(x, &allocation.0)
-									.context("cmd interpolation failed")?)
-							})
-							.collect::<Result<Vec<String>, failure::Error>>()?,
-					)
-					.envs(
-						envs.iter()
-							.map(|(k, v)| -> Result<_, failure::Error> {
-								let a = strfmt::strfmt(k, &allocation.0)
-									.context("env key interpolation failed")?;
-								let b = strfmt::strfmt(v, &allocation.0)
-									.context("env value interpolation failed")?;
-								Ok((a, b))
-							})
-							.collect::<Result<Vec<_>, failure::Error>>()?,
-					)
-					.current_dir(cwd)
-					.stdin(Stdio::null())
-					.stdout(Stdio::null())
-					.stderr(Stdio::null())
-					.spawn_async()
-					.context("fail to spawn child")?;
+			let child = std::process::Command::new(&cmd[0])
+				.args(
+					cmd[1..]
+						.iter()
+						.map(|x| -> Result<String, failure::Error> {
+							Ok(strfmt::strfmt(x, &allocation.0)
+								.context("cmd interpolation failed")?)
+						})
+						.collect::<Result<Vec<String>, failure::Error>>()?,
+				)
+				.envs(
+					envs.iter()
+						.map(|(k, v)| -> Result<_, failure::Error> {
+							let a = strfmt::strfmt(k, &allocation.0)
+								.context("env key interpolation failed")?;
+							let b = strfmt::strfmt(v, &allocation.0)
+								.context("env value interpolation failed")?;
+							Ok((a, b))
+						})
+						.collect::<Result<Vec<_>, failure::Error>>()?,
+				)
+				.current_dir(cwd)
+				.stdin(Stdio::null())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.spawn_async()
+				.context("fail to spawn child")?;
 
-				sender
-					.unbounded_send(Message::JobUpdate {
-						job_id: job.id.clone(),
-						status: JobStatus::Running { pid: child.id() },
-					})
-					.context("[Worker] error sending JobUpdate msg")?;
+			sender
+				.unbounded_send(Message::JobUpdate {
+					job_id: job.id.clone(),
+					status: JobStatus::Running { pid: child.id() },
+				})
+				.context("[Worker] error sending JobUpdate msg")?;
 
-				let status = await!(child.compat()).context("cannot wait child process")?;
-				Ok(status)
-			}
-		);
+			let status = child.compat().await.context("cannot wait child process")?;
+			Ok(status)
+		}.await;
 
 		let status = match result {
 			Ok(status) => {
@@ -309,12 +306,11 @@ impl WorkerInner {
 
 		// restore resource
 		{
-			let mut available = await!(self.available.lock());
+			let mut available = self.available.lock().await;
 			available.restore(&job);
 		}
 
-		q.running
-			.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+		q.running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
 		sender
 			.unbounded_send(Message::JobUpdate {
@@ -359,7 +355,7 @@ impl Service for WorkerRPCServerImpl {
 
 	type InfoFut = std::pin::Pin<Box<dyn Future<Output = WorkerInfo> + Send>>;
 	fn info(self, _: context::Context) -> Self::InfoFut {
-		Box::pin(async move { await!(WorkerInfo::from(self.worker.clone())) })
+		Box::pin(async move { WorkerInfo::from(self.worker.clone()).await })
 	}
 }
 
@@ -395,8 +391,7 @@ pub struct Queue {
 	pub running: std::sync::atomic::AtomicU32,
 }
 
-impl Queue {
-}
+impl Queue {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerNodeSpec {
@@ -441,7 +436,7 @@ impl QueueInfo {
 	async fn vec_from_queues(queues: &BTreeMap<String, Arc<Queue>>) -> Vec<QueueInfo> {
 		let mut q_infos = vec![];
 		for (_q_name, q) in queues.iter() {
-			q_infos.push(await!(QueueInfo::from(&q)));
+			q_infos.push(QueueInfo::from(&q).await);
 		}
 		q_infos
 	}
@@ -456,16 +451,15 @@ pub struct WorkerInfo {
 	// dynamic
 	pub queue_infos: Vec<QueueInfo>,
 	// pub state: WorkerState, // cpu load, running job num, ..
-
 	pub available: WorkerCapacity,
 }
 
 impl WorkerInfo {
 	pub async fn from(worker: Arc<WorkerInner>) -> WorkerInfo {
-		let queues = await!(worker.queues.lock());
-		let q_infos = await!(QueueInfo::vec_from_queues(&queues));
+		let queues = worker.queues.lock().await;
+		let q_infos = QueueInfo::vec_from_queues(&queues).await;
 
-		let available = await!(worker.available.lock()).clone();
+		let available = worker.available.lock().await.clone();
 
 		WorkerInfo {
 			broker_addr: worker.broker_addr.clone(),
@@ -479,21 +473,16 @@ impl WorkerInfo {
 		vec![
 			self.node_spec.hostname.clone(),
 			format!("{} ({})", self.node_spec.os, self.node_spec.os_release),
-			self
-				.node_spec
+			self.node_spec
 				.get_uptime()
 				.to_std()
 				.map(|d| timeago::Formatter::new().convert(d))
 				.unwrap_or("time sync mismatch".to_string()),
-			self
-				.queue_infos
+			self.queue_infos
 				.iter() // queues
-				.map(|q_info| format!(
-					"{} ({}? running)",
-					&q_info.name, &q_info.running
-				))
+				.map(|q_info| format!("{} ({}? running)", &q_info.name, &q_info.running))
 				.collect::<Vec<_>>()
-				.join(", ")
+				.join(", "),
 		]
 	}
 }

@@ -81,11 +81,9 @@ mod tests {
 			|| {
 				let (sender, flag) = new::<u32>();
 				sender.send(98124).unwrap();
-				crate::compat::tokio_run(
-					async {
-						assert!(await!(flag) == Ok(98124));
-					},
-				);
+				crate::compat::tokio_run(async {
+					assert!(flag.await == Ok(98124));
+				});
 			},
 			1000,
 		);
@@ -101,19 +99,15 @@ mod tests {
 				let flag1 = flag.clone();
 				let flag2 = flag1.clone();
 
-				crate::compat::tokio_run(
-					async move {
-						crate::compat::tokio_spawn(
-							async move {
-								assert!(await!(flag1) == Ok(1234));
-								assert!(await!(flag2) == Ok(1234));
-								assert!(await!(flag) == Ok(1234));
-							},
-						);
-						sender2.send(1234).unwrap();
-						assert!(sender1.send(4213).is_err());
-					},
-				);
+				crate::compat::tokio_run(async move {
+					crate::compat::tokio_spawn(async move {
+						assert!(flag1.await == Ok(1234));
+						assert!(flag2.await == Ok(1234));
+						assert!(flag.await == Ok(1234));
+					});
+					sender2.send(1234).unwrap();
+					assert!(sender1.send(4213).is_err());
+				});
 			},
 			1000,
 		);
@@ -125,12 +119,10 @@ mod tests {
 			|| {
 				let (sender, flag) = new::<u32>();
 				sender.send(198124).unwrap();
-				crate::compat::tokio_run(
-					async move {
-						assert!(await!(flag) == Ok(198124));
-						assert!(sender.send(2193).is_err());
-					},
-				);
+				crate::compat::tokio_run(async move {
+					assert!(flag.await == Ok(198124));
+					assert!(sender.send(2193).is_err());
+				});
 			},
 			1000,
 		);
@@ -142,16 +134,14 @@ mod tests {
 			|| {
 				let (sender, flag) = new::<()>();
 
-				crate::compat::tokio_run(
-					async move {
-						let vec = vec![6, 7, 8, 9, 10];
-						let mut stream = futures::stream::iter(vec.iter()).take_until(flag.map(|_| ()));
-						assert_eq!(await!(stream.next()), Some(&6));
-						assert_eq!(await!(stream.next()), Some(&7));
-						sender.send(()).unwrap();
-						assert_eq!(await!(stream.next()), None);
-					},
-				);
+				crate::compat::tokio_run(async move {
+					let vec = vec![6, 7, 8, 9, 10];
+					let mut stream = futures::stream::iter(vec.iter()).take_until(flag.map(|_| ()));
+					assert_eq!(stream.next().await, Some(&6));
+					assert_eq!(stream.next().await, Some(&7));
+					sender.send(()).unwrap();
+					assert_eq!(stream.next().await, None);
+				});
 			},
 			1000,
 		);

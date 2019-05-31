@@ -1,7 +1,6 @@
 use colored::*;
 use tarpc::context;
 
-
 use crate::broker::BrokerInfo;
 use crate::daemon::DaemonInfo;
 
@@ -228,7 +227,6 @@ fn print_interactive(
 						.jobs
 						.iter()
 						.map(|job| {
-
 							let row = Row::StyledData(
 								job.display_columns().into_iter(),
 								if i == *selection {
@@ -274,7 +272,6 @@ fn print_interactive(
 							} else {
 								view = View::Job(*selection - broker_info.workers.len());
 							}
-
 						}
 						Key::Down => {
 							index += 1;
@@ -319,14 +316,14 @@ fn print_interactive(
 pub fn run(broker_addr: std::net::SocketAddr, interactive: bool) -> Result<(), failure::Error> {
 	let (daemon_info, broker_info) = compat::tokio_try_run(async move {
 		let daemon_info: DaemonInfo = {
-			let mut client = await!(daemon::new_daemon_client())?;
-			await!(client.info(context::current()))?
+			let mut client = daemon::new_daemon_client().await?;
+			client.info(context::current()).await?
 		};
 
 		// broker
 		let broker_info: BrokerInfo = {
-			let mut client = await!(broker::new_broker_client(broker_addr))?;
-			await!(client.info(context::current()))?
+			let mut client = broker::new_broker_client(broker_addr).await?;
+			client.info(context::current()).await?
 		};
 
 		Ok((daemon_info, broker_info))

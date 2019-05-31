@@ -61,69 +61,66 @@ impl Daemon {
 	pub fn run_sync(&self) {
 		tarpc::init(tokio::executor::DefaultExecutor::current().compat());
 		let inner = self.inner.clone();
-		crate::compat::tokio_try_run(
-			async move {
-				let log = slog_scope::logger();
-				info!(log, "[Daemon] Running.");
+		crate::compat::tokio_try_run(async move {
+			let log = slog_scope::logger();
+			info!(log, "[Daemon] Running.");
 
-				if inner.broker.is_some() {
-					let inner = inner.clone();
-					crate::compat::tokio_try_spawn(
-						async move {
-							await!(inner
-								.broker
-								.as_ref()
-								.ok_or(failure::err_msg("no broker component"))?
-								.run_async())
-							.context("error from broker")?;
-							Ok(())
-						},
-					);
-				}
-				if inner.worker.is_some() {
-					let inner = inner.clone();
-					crate::compat::tokio_try_spawn(
-						async move {
-							await!(inner
-								.worker
-								.as_ref()
-								.ok_or(failure::err_msg("no worker component"))?
-								.run_async())
-							.context("error from worker")?;
-							Ok(())
-						},
-					);
-				}
-
-				// daemon RPC server
-				use tokio::net::UnixListener;
-
-				let listener = UnixListener::bind("/tmp/grass.sock")
-					.context("Fail to bind /tmp/grass.sock")?;
+			if inner.broker.is_some() {
 				let inner = inner.clone();
+				crate::compat::tokio_try_spawn(async move {
+					inner
+						.broker
+						.as_ref()
+						.ok_or(failure::err_msg("no broker component"))?
+						.run_async()
+						.await
+						.context("error from broker")?;
+					Ok(())
+				});
+			}
+			if inner.worker.is_some() {
+				let inner = inner.clone();
+				crate::compat::tokio_try_spawn(async move {
+					inner
+						.worker
+						.as_ref()
+						.ok_or(failure::err_msg("no worker component"))?
+						.run_async()
+						.await
+						.context("error from worker")?;
+					Ok(())
+				});
+			}
 
-				let mut listener = listener
-					.incoming()
-					.compat()
-					.take_until(inner.stop_flag.clone().map(|_| ()));
+			// daemon RPC server
+			use tokio::net::UnixListener;
 
-				// let der = {
-				// 	let mut file =
-				// 		std::fs::File::open("	keyStore.p12").context("p12 file does not exist")?;
-				// 	let mut bytes = vec![];
-				// 	file.read_to_end(&mut bytes)
-				// 		.context("Fail to read .p12 key")?;
-				// 	bytes
-				// };
+			let listener =
+				UnixListener::bind("/tmp/grass.sock").context("Fail to bind /tmp/grass.sock")?;
+			let inner = inner.clone();
 
-				// let cert = native_tls::Identity::from_pkcs12(&der[..], "1234")
-				// 	.context("Wrong passphrase for .p12")?;
-				// let tls_acceptor = native_tls::TlsAcceptor::builder(cert)
-				// 	.build()
-				// 	.context("Error building native_tls::TlsAcceptor")?;
-				// let tls_acceptor = tokio_tls::TlsAcceptor::from(tls_acceptor);
+			let mut listener = listener
+				.incoming()
+				.compat()
+				.take_until(inner.stop_flag.clone().map(|_| ()));
 
-				while let Some(stream) = await!(listener.next()) {
+			// let der = {
+			// 	let mut file =
+			// 		std::fs::File::open("	keyStore.p12").context("p12 file does not exist")?;
+			// 	let mut bytes = vec![];
+			// 	file.read_to_end(&mut bytes)
+			// 		.context("Fail to read .p12 key")?;
+			// 	bytes
+			// };
+
+			// let cert = native_tls::Identity::from_pkcs12(&der[..], "1234")
+			// 	.context("Wrong passphrase for .p12")?;
+			// let tls_acceptor = native_tls::TlsAcceptor::builder(cert)
+			// 	.build()
+			// 	.context("Error building native_tls::TlsAcceptor")?;
+			// let tls_acceptor = tokio_tls::TlsAcceptor::from(tls_acceptor);
+
+			while let Some(stream) = listener.next().await {
 					info!(log, "[Daemon] new RPC connection");
 
 					clone_all::clone_all!(log, inner
@@ -132,16 +129,16 @@ impl Daemon {
 					crate::compat::tokio_try_spawn(
 						async move {
 							let stream = stream.context("cannot open tcp stream")?;
-							// let stream = await!(tls_acceptor.accept(stream).compat())
+							// let stream = tls_acceptor.accept(stream).compat().await
 							// 	.context("fail to handshake tls")?;
 
 							let transport = tarpc_bincode_transport::new(stream).fuse(); // fuse from Future03 ext trait
 							let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
 							let channel =
 								tarpc::server::Channel::new_simple_channel(transport, sender);
-							await!(channel.respond_with(serve(DaemonRPCServerImpl {
+							channel.respond_with(serve(DaemonRPCServerImpl {
 								daemon_inner: inner.clone(),
-							})));
+							})).await;
 
 							info!(log, "[Daemon] Connection closed");
 							Ok(())
@@ -149,9 +146,9 @@ impl Daemon {
 					);
 				}
 
-				Ok(())
-			},
-		).unwrap();
+			Ok(())
+		})
+		.unwrap();
 		let log = slog_scope::logger();
 		info!(log, "[Daemon] exit");
 	}
@@ -187,29 +184,25 @@ impl Service for DaemonRPCServerImpl {
 
 	type CreateQueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn create_queue(self, _: context::Context, config: QueueConfig) -> Self::CreateQueueFut {
-		Box::pin(
-			async move {
-				if let Some(worker) = self.daemon_inner.worker.as_ref() {
-					await!(worker.create_queue(config));
-				}
-			},
-		)
+		Box::pin(async move {
+			if let Some(worker) = self.daemon_inner.worker.as_ref() {
+				worker.create_queue(config).await;
+			}
+		})
 	}
 
 	type DeleteQueueFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn delete_queue(self, _: context::Context, name: String) -> Self::DeleteQueueFut {
-		Box::pin(
-			async move {
-				if let Some(worker) = self.daemon_inner.worker.as_ref() {
-					await!(worker.delete_queue(name));
-				}
-			},
-		)
+		Box::pin(async move {
+			if let Some(worker) = self.daemon_inner.worker.as_ref() {
+				worker.delete_queue(name).await;
+			}
+		})
 	}
 
 	type InfoFut = Pin<Box<dyn Future<Output = DaemonInfo> + Send>>;
 	fn info(self, _: context::Context) -> Self::InfoFut {
-		Box::pin(async move { await!(DaemonInfo::from(self.daemon_inner.clone())) })
+		Box::pin(async move { DaemonInfo::from(self.daemon_inner.clone()).await })
 	}
 }
 
@@ -219,7 +212,7 @@ use tokio::prelude::*;
 pub async fn new_daemon_client() -> Result<Client, failure::Error> {
 	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Daemon.");
-	let tcp: UnixStream = await!(UnixStream::connect("/tmp/grass.sock").compat())
+	let tcp: UnixStream = UnixStream::connect("/tmp/grass.sock").compat().await
 		.context("Could not connect to Daemon")?;
 	// let tls_connector = tokio_tls::TlsConnector::from(
 	// 	native_tls::TlsConnector::builder()
@@ -230,9 +223,9 @@ pub async fn new_daemon_client() -> Result<Client, failure::Error> {
 	// 		.context("cannot build tls connector")?,
 	// );
 	// let tcp =
-	// 	await!(tls_connector.connect("domain", tcp).compat()).context("cannot establish TLS")?;
+	// 	tls_connector.connect("domain", tcp).compat().await.context("cannot establish TLS")?;
 	let transport = tarpc_bincode_transport::Transport::from(tcp);
-	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
+	let client = new_stub(tarpc::client::Config::default(), transport).await?;
 	info!(log, "[Client] Connected to Daemon.");
 	Ok(client)
 }
@@ -251,12 +244,12 @@ impl DaemonInfo {
 		DaemonInfo {
 			broker: daemon.broker.is_some(),
 			// if let Some(broker) = daemon.broker.as_ref() {
-			// 	Some(await!(BrokerInfo::from(broker.inner.clone())))
+			// 	Some(BrokerInfo::from(broker.inner.clone()).await)
 			// } else {
 			// 	None
 			// },
 			worker: if let Some(worker) = daemon.worker.as_ref() {
-				Some(await!(WorkerInfo::from(worker.inner.clone())))
+				Some(WorkerInfo::from(worker.inner.clone()).await)
 			} else {
 				None
 			},

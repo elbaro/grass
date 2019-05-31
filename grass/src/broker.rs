@@ -85,7 +85,7 @@ impl Broker {
 			.take_until(self.inner.stop_flag.clone().map(|_| ()));
 
 		let inner = self.inner.clone();
-		while let Some(stream) = await!(serving.next()) {
+		while let Some(stream) = serving.next().await {
 			clone_all::clone_all!(log, inner);
 			crate::compat::tokio_try_spawn(
 				async move {
@@ -100,7 +100,7 @@ impl Broker {
 						yamux::Config::default(),
 						yamux::Mode::Server,
 					).compat();
-					let stream = await!(mux.next())
+					let stream = mux.next().await
 						.ok_or(failure::err_msg("cannot open mux"))?
 						.context("cannot open mux")?;
 
@@ -119,25 +119,25 @@ impl Broker {
 					// stream2: client (optional)
 					let mut fut2 = Box::pin(
 						async {
-							if let Some(Ok(conn2)) = await!(mux.next()) {
+							if let Some(Ok(conn2)) = mux.next().await {
 								// may block, but exit with flag
 								let transport = tarpc_bincode_transport::new(conn2);
-								let mut client = await!(crate::worker::new_stub(
+								let mut client = crate::worker::new_stub(
 									tarpc::client::Config::default(),
 									transport
-								))
+								).await
 								.context("error from tarpc serving")?;
 
 								// request initial WorkerInfo
-								let info = await!(client.info(context::current()))
+								let info = client.info(context::current()).await
 									.expect("fail to info()");
-								await!(inner.workers.lock()).insert(session_id.clone(), info);
-								await!(inner.worker_conns.lock())
+								inner.workers.lock().await.insert(session_id.clone(), info);
+								inner.worker_conns.lock().await
 									.insert(session_id.clone(), client);
 
 								info!(log, "[Broker] New worker client registered";"id"=>&session_id);
 							}
-							let _ = await!(inner.stop_flag.clone()); // cancel
+							let _ = inner.stop_flag.clone().await; // cancel
 							Result::<(), failure::Error>::Ok(())
 						},
 					)
@@ -156,8 +156,8 @@ impl Broker {
 						},
 					};
 					// clean-up
-					await!(inner.workers.lock()).remove(&session_id);
-					await!(inner.worker_conns.lock()).remove(&session_id);
+					inner.workers.lock().await.remove(&session_id);
+					inner.worker_conns.lock().await.remove(&session_id);
 					Ok(())
 				},
 			);
@@ -189,8 +189,8 @@ pub struct BrokerInfo {
 
 impl BrokerInfo {
 	pub async fn from(broker: Arc<BrokerInner>) -> BrokerInfo {
-		let jobs = await!(broker.jobs.lock());
-		let workers = await!(broker.workers.lock());
+		let jobs = broker.jobs.lock().await;
+		let workers = broker.workers.lock().await;
 
 		BrokerInfo {
 			bind_addr: broker.bind_addr,
@@ -226,7 +226,7 @@ impl Service for BrokerRPCServerImpl {
 		info!(log, "[Broker] job_update()");
 		Box::pin(
 			async move {
-				await!(self.broker.jobs.lock())
+				self.broker.jobs.lock().await
 					.get_mut(&job_id)
 					.unwrap()
 					.status = status;
@@ -245,8 +245,8 @@ impl Service for BrokerRPCServerImpl {
 		info!(log, "[Broker] job_request()"; "q"=>&q_name, "capacity"=>?capacity);
 		Box::pin(
 			async move {
-				let mut jobs = await!(self.broker.jobs.lock());
-				let mut pending_job_ids = await!(self.broker.pending_job_ids.lock());
+				let mut jobs = self.broker.jobs.lock().await;
+				let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
 
 				match 'hunt: {
 					for id in &*pending_job_ids {
@@ -281,19 +281,19 @@ impl Service for BrokerRPCServerImpl {
 		crate::compat::tokio_try_spawn(Box::pin(
 			async move {
 				let job = spec.build();
-				let mut jobs = await!(self.broker.jobs.lock());
-				let mut pending_job_ids = await!(self.broker.pending_job_ids.lock());
+				let mut jobs = self.broker.jobs.lock().await;
+				let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
 
 				let job_id = job.id.clone();
 				jobs.insert(job_id.clone(), job);
 				pending_job_ids.insert(job_id);
 
 				// broadcast to clients
-				let mut worker_conns = await!(self.broker.worker_conns.lock());
+				let mut worker_conns = self.broker.worker_conns.lock().await;
 				// let futs = vec![];
 				info!(log, "Broadcasting to workers"; "num_workers"=>worker_conns.len());
 				for (_worker_id, worker_client) in worker_conns.iter_mut() {
-					await!(worker_client.on_new_job(context::current()))
+					worker_client.on_new_job(context::current()).await
 						.context("fail to call on_new_job()")?;
 				}
 				Ok(())
@@ -304,13 +304,13 @@ impl Service for BrokerRPCServerImpl {
 
 	type InfoFut = Pin<Box<dyn Future<Output = BrokerInfo> + Send>>;
 	fn info(self, _: context::Context) -> Self::InfoFut {
-		Box::pin(async move { await!(BrokerInfo::from(self.broker)) })
+		Box::pin(async move { BrokerInfo::from(self.broker).await })
 	}
 
 	type UpdateWorkerStateFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 	fn update_worker_state(self, _:context::Context, q_infos: Vec<QueueInfo>) -> Self::UpdateWorkerStateFut{
 		Box::pin(async move {
-			let mut workers = await!(self.broker.workers.lock());
+			let mut workers = self.broker.workers.lock().await;
 			if let Some(worker_info) = workers.get_mut(&self.session_id) {
 				(*worker_info).queue_infos = q_infos;
 			}
@@ -321,7 +321,7 @@ impl Service for BrokerRPCServerImpl {
 pub async fn new_broker_client(addr: SocketAddr) -> Result<Client, failure::Error> {
 	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Broker."; "addr"=>&addr);
-	let stream: TcpStream = await!(TcpStream::connect(&addr).compat())?;
+	let stream: TcpStream = TcpStream::connect(&addr).compat().await?;
 
 	let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
 	let stream = mux
@@ -330,7 +330,7 @@ pub async fn new_broker_client(addr: SocketAddr) -> Result<Client, failure::Erro
 		.ok_or(failure::err_msg("[Client] Failed to open mux"))?; // client
 
 	let transport = tarpc_bincode_transport::Transport::from(stream);
-	let client = await!(new_stub(tarpc::client::Config::default(), transport))?;
+	let client = new_stub(tarpc::client::Config::default(), transport).await?;
 	info!(log, "[Client] Connected to Broker.");
 	Ok(client)
 }
