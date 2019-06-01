@@ -16,10 +16,3 @@ jobs:
     name: test
     displayName: Test Async / Await
     rust: $(nightly)
-
-
-- template: ci/azure-deploy-docs.yml
-  parameters:
-    dependsOn:
-      - rustfmt
-      - test

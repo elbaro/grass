@@ -3,3 +3,9 @@ members = [
     "grass",
     "grass-ui",
 ]
+
+[patch.crates-io]
+grass = { path = 'grass' }
+http-service = { git = "https://github.com/rustasync/http-service", branch = "master" }
+http-service-hyper = { git = "https://github.com/rustasync/http-service", branch = "master" }
+http-service-mock = { git = "https://github.com/rustasync/http-service", branch = "master" }
