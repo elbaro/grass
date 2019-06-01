@@ -1,0 +1,25 @@
+trigger: ["master"]
+pr: ["master"]
+
+variables:
+  nightly: nightly
+
+jobs:
+# Check formatting
+- template: ci/azure-rustfmt.yml
+  parameters:
+    name: rustfmt
+
+# Run async-await tests
+- template: ci/azure-test.yml
+  parameters:
+    name: test
+    displayName: Test Async / Await
+    rust: $(nightly)
+
+
+- template: ci/azure-deploy-docs.yml
+  parameters:
+    dependsOn:
+      - rustfmt
+      - test

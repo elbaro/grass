@@ -16,11 +16,12 @@ cargo install --git https://github.com/elbaro/grass
 
 ## Example - Local setup
 ```
-grass daemon
-grass create-queue job1 --capacity "{gpu:4,cpu:16}" main.py arg1
+grass daemon --capacity "{gpu:4,cpu:16}"
+grass create-queue job1 main.py arg1
+grass create-queue any --unsecure
 grass enqueue --require "{gpu:1}" --env "CUDA_VISIBLE_DEVICES={gpu}" job1 arg2 arg3
 grass enqueue --require "{gpu:0.5}" --env "CUDA_VISIBLE_DEVICES={gpu}" job2 arg2 arg3
-grass enqueue  python train.py
+grass enqueue any echo 123
 ```
 
 grass supports json5.
@@ -32,6 +33,12 @@ import os
 for lr in [0.01, 0.1]:
     for batch_size in [8, 16, 32]:
         os.system("grass enqueue --require '{gpu:0.5}' --cwd=/data/ --env='CUDA_VISIBLE_DEVICES={gpu}' -- python train.py lr=%s batch_size=%s" % (lr,batch_size))
+```
+
+For multiple workers with different capacities,
+```
+grass daemon --capacity "{gpu:4,cpu:16}" // broker+worker
+grass worker --capacity "{gpu:2,cpu:8}" // additional worker
 ```
 
 ## Example - Multi nodes
