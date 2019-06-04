@@ -1,6 +1,6 @@
 # Grass
 
-[![Build Status](https://travis-ci.org/elbaro/grass.svg)](https://travis-ci.org/elbaro/grass) [![Code Coverage](https://codecov.io/gh/elbaro/grass/branch/master/graph/badge.svg)](https://codecov.io/gh/elbaro/grass)
+[![Build Status](https://dev.azure.com/elbaro/grass/_apis/build/status/elbaro.grass?branchName=master)](https://dev.azure.com/elbaro/grass/_build/latest?definitionId=1&branchName=master) [![Code Coverage](https://codecov.io/gh/elbaro/grass/branch/master/graph/badge.svg)](https://codecov.io/gh/elbaro/grass)
 
 [Wiki](https://github.com/elbaro/grass/wiki) | [Releases](https://github.com/elbaro/grass/releases) | [Changelog](https://github.com/elbaro/grass/blob/master/CHANGELOG.md)
 
