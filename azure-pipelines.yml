@@ -9,6 +9,7 @@ jobs:
 - template: ci/azure-rustfmt.yml
   parameters:
     name: rustfmt
+  continueOnError: true
 
 # Run async-await tests
 - template: ci/azure-test.yml
