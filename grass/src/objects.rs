@@ -219,24 +219,15 @@ impl Job {
 
 		let (status, result) = match &self.status {
 			JobStatus::Pending => ("Pending".to_string(), "".to_string()),
-			JobStatus::Running { pid } => (
-				"Running".yellow().to_string(),
-				format!("pid: {}", pid),
-			),
+			JobStatus::Running { pid } => ("Running".yellow().to_string(), format!("pid: {}", pid)),
 			JobStatus::Finished {
 				exit_status: Ok(()),
 				..
-			} => (
-				"Success".green().to_string(),
-				"-".to_string(),
-			),
+			} => ("Success".green().to_string(), "-".to_string()),
 			JobStatus::Finished {
 				exit_status: Err(err),
 				..
-			} => (
-				"Failed".red().to_string(),
-				err.to_string(),
-			),
+			} => ("Failed".red().to_string(), err.to_string()),
 		};
 
 		let allocation: String = self

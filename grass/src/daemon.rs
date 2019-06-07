@@ -212,7 +212,9 @@ use tokio::prelude::*;
 pub async fn new_daemon_client() -> Result<Client, failure::Error> {
 	let log = slog_scope::logger();
 	info!(log, "[Client] Connecting to Daemon.");
-	let tcp: UnixStream = UnixStream::connect("/tmp/grass.sock").compat().await
+	let tcp: UnixStream = UnixStream::connect("/tmp/grass.sock")
+		.compat()
+		.await
 		.context("Could not connect to Daemon")?;
 	// let tls_connector = tokio_tls::TlsConnector::from(
 	// 	native_tls::TlsConnector::builder()

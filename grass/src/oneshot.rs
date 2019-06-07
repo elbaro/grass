@@ -1,7 +1,7 @@
+use futures::{task::Context, Future, FutureExt, Poll, Stream};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use futures::{task::Context, Future, FutureExt, Poll, Stream};
 
 #[derive(Clone)]
 pub struct OneshotSender<T = ()> {

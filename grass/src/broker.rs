@@ -1,5 +1,5 @@
 use crate::objects::{Job, JobSpecification, JobStatus, WorkerCapacity};
-use crate::worker::{WorkerInfo, QueueInfo};
+use crate::worker::{QueueInfo, WorkerInfo};
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -87,80 +87,80 @@ impl Broker {
 		let inner = self.inner.clone();
 		while let Some(stream) = serving.next().await {
 			clone_all::clone_all!(log, inner);
-			crate::compat::tokio_try_spawn(
-				async move {
-					// let inner = (&inner).clone();
-					let session_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
-					info!(log, "[Broker] New session";"id"=>&session_id);
-					let stream = stream.context("cannot open stream")?;
+			crate::compat::tokio_try_spawn(async move {
+				// let inner = (&inner).clone();
+				let session_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
+				info!(log, "[Broker] New session";"id"=>&session_id);
+				let stream = stream.context("cannot open stream")?;
 
-					// yamux
-					let mut mux = yamux::Connection::new(
-						stream,
-						yamux::Config::default(),
-						yamux::Mode::Server,
-					).compat();
-					let stream = mux.next().await
-						.ok_or(failure::err_msg("cannot open mux"))?
-						.context("cannot open mux")?;
+				// yamux
+				let mut mux =
+					yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Server)
+						.compat();
+				let stream = mux
+					.next()
+					.await
+					.ok_or(failure::err_msg("cannot open mux"))?
+					.context("cannot open mux")?;
 
-					// stream1: rpc server
-					let transport = tarpc_bincode_transport::new(stream).fuse(); //.fuse(∂);  // fuse from Future03 ext trait
-					let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
-					let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
+				// stream1: rpc server
+				let transport = tarpc_bincode_transport::new(stream).fuse(); //.fuse(∂);  // fuse from Future03 ext trait
+				let (sender, _recv) = futures::channel::mpsc::unbounded::<SocketAddr>();
+				let channel = tarpc::server::Channel::new_simple_channel(transport, sender);
 
-					let mut session_serve = channel
-						.respond_with(serve(BrokerRPCServerImpl {
-							session_id: session_id.clone(),
-							broker: inner.clone(),
-						}))
-						.fuse();
-
-					// stream2: client (optional)
-					let mut fut2 = Box::pin(
-						async {
-							if let Some(Ok(conn2)) = mux.next().await {
-								// may block, but exit with flag
-								let transport = tarpc_bincode_transport::new(conn2);
-								let mut client = crate::worker::new_stub(
-									tarpc::client::Config::default(),
-									transport
-								).await
-								.context("error from tarpc serving")?;
-
-								// request initial WorkerInfo
-								let info = client.info(context::current()).await
-									.expect("fail to info()");
-								inner.workers.lock().await.insert(session_id.clone(), info);
-								inner.worker_conns.lock().await
-									.insert(session_id.clone(), client);
-
-								info!(log, "[Broker] New worker client registered";"id"=>&session_id);
-							}
-							let _ = inner.stop_flag.clone().await; // cancel
-							Result::<(), failure::Error>::Ok(())
-						},
-					)
+				let mut session_serve = channel
+					.respond_with(serve(BrokerRPCServerImpl {
+						session_id: session_id.clone(),
+						broker: inner.clone(),
+					}))
 					.fuse();
 
-					let mut stop_flag = inner.stop_flag.clone().fuse();
-					futures::select! {
-						_ = session_serve => {
-							info!(log, "[Broker] Session closed"; "reason" => "rpc server TCP connection closed by peer","id"=>&session_id);
-						},
-						result = fut2 => {
-							info!(log, "[Broker] Session closed"; "reason" => "worker client TCP connection closed by peer","id"=>&session_id);
-						},
-						_ = stop_flag => {
-							info!(log, "[Broker] Session closed"; "reason" => "STOP signal","id"=>&session_id);
-						},
-					};
-					// clean-up
-					inner.workers.lock().await.remove(&session_id);
-					inner.worker_conns.lock().await.remove(&session_id);
-					Ok(())
-				},
-			);
+				// stream2: client (optional)
+				let mut fut2 = Box::pin(async {
+					if let Some(Ok(conn2)) = mux.next().await {
+						// may block, but exit with flag
+						let transport = tarpc_bincode_transport::new(conn2);
+						let mut client =
+							crate::worker::new_stub(tarpc::client::Config::default(), transport)
+								.await
+								.context("error from tarpc serving")?;
+
+						// request initial WorkerInfo
+						let info = client
+							.info(context::current())
+							.await
+							.expect("fail to info()");
+						inner.workers.lock().await.insert(session_id.clone(), info);
+						inner
+							.worker_conns
+							.lock()
+							.await
+							.insert(session_id.clone(), client);
+
+						info!(log, "[Broker] New worker client registered";"id"=>&session_id);
+					}
+					let _ = inner.stop_flag.clone().await; // cancel
+					Result::<(), failure::Error>::Ok(())
+				})
+				.fuse();
+
+				let mut stop_flag = inner.stop_flag.clone().fuse();
+				futures::select! {
+					_ = session_serve => {
+						info!(log, "[Broker] Session closed"; "reason" => "rpc server TCP connection closed by peer","id"=>&session_id);
+					},
+					result = fut2 => {
+						info!(log, "[Broker] Session closed"; "reason" => "worker client TCP connection closed by peer","id"=>&session_id);
+					},
+					_ = stop_flag => {
+						info!(log, "[Broker] Session closed"; "reason" => "STOP signal","id"=>&session_id);
+					},
+				};
+				// clean-up
+				inner.workers.lock().await.remove(&session_id);
+				inner.worker_conns.lock().await.remove(&session_id);
+				Ok(())
+			});
 		}
 		info!(log, "[Broker] exit");
 		Ok(())
@@ -224,14 +224,15 @@ impl Service for BrokerRPCServerImpl {
 	) -> Self::JobUpdateFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] job_update()");
-		Box::pin(
-			async move {
-				self.broker.jobs.lock().await
-					.get_mut(&job_id)
-					.unwrap()
-					.status = status;
-			},
-		)
+		Box::pin(async move {
+			self.broker
+				.jobs
+				.lock()
+				.await
+				.get_mut(&job_id)
+				.unwrap()
+				.status = status;
+		})
 	}
 
 	type JobRequestFut = std::pin::Pin<Box<dyn Future<Output = Option<Job>> + Send>>;
@@ -243,34 +244,32 @@ impl Service for BrokerRPCServerImpl {
 	) -> Self::JobRequestFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] job_request()"; "q"=>&q_name, "capacity"=>?capacity);
-		Box::pin(
-			async move {
-				let mut jobs = self.broker.jobs.lock().await;
-				let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
+		Box::pin(async move {
+			let mut jobs = self.broker.jobs.lock().await;
+			let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
 
-				match 'hunt: {
-					for id in &*pending_job_ids {
-						if jobs[id].spec.q_name == q_name {
-							if let Some(allocation) = capacity.can_run_job(&jobs[id].spec.require) {
-								break 'hunt Some((id.clone(), allocation));
-							}
+			match 'hunt: {
+				for id in &*pending_job_ids {
+					if jobs[id].spec.q_name == q_name {
+						if let Some(allocation) = capacity.can_run_job(&jobs[id].spec.require) {
+							break 'hunt Some((id.clone(), allocation));
 						}
 					}
-					None
-				} {
-					Some((id, allocation)) => {
-						pending_job_ids.remove(&id);
-						let mut job = jobs.get_mut(&id).unwrap();
-						job.allocation = Some(allocation);
-						return Some(job.clone());
-					}
-					None => {
-						// no available job
-						return None;
-					}
-				};
-			},
-		)
+				}
+				None
+			} {
+				Some((id, allocation)) => {
+					pending_job_ids.remove(&id);
+					let mut job = jobs.get_mut(&id).unwrap();
+					job.allocation = Some(allocation);
+					return Some(job.clone());
+				}
+				None => {
+					// no available job
+					return None;
+				}
+			};
+		})
 	}
 
 	/// Broker <-> CLI
@@ -278,27 +277,27 @@ impl Service for BrokerRPCServerImpl {
 	fn job_enqueue(self, _: context::Context, spec: JobSpecification) -> Self::JobEnqueueFut {
 		let log = slog_scope::logger();
 		info!(log, "[Broker] enqueue()"; "spec"=>?spec);
-		crate::compat::tokio_try_spawn(Box::pin(
-			async move {
-				let job = spec.build();
-				let mut jobs = self.broker.jobs.lock().await;
-				let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
+		crate::compat::tokio_try_spawn(Box::pin(async move {
+			let job = spec.build();
+			let mut jobs = self.broker.jobs.lock().await;
+			let mut pending_job_ids = self.broker.pending_job_ids.lock().await;
 
-				let job_id = job.id.clone();
-				jobs.insert(job_id.clone(), job);
-				pending_job_ids.insert(job_id);
+			let job_id = job.id.clone();
+			jobs.insert(job_id.clone(), job);
+			pending_job_ids.insert(job_id);
 
-				// broadcast to clients
-				let mut worker_conns = self.broker.worker_conns.lock().await;
-				// let futs = vec![];
-				info!(log, "Broadcasting to workers"; "num_workers"=>worker_conns.len());
-				for (_worker_id, worker_client) in worker_conns.iter_mut() {
-					worker_client.on_new_job(context::current()).await
-						.context("fail to call on_new_job()")?;
-				}
-				Ok(())
-			},
-		));
+			// broadcast to clients
+			let mut worker_conns = self.broker.worker_conns.lock().await;
+			// let futs = vec![];
+			info!(log, "Broadcasting to workers"; "num_workers"=>worker_conns.len());
+			for (_worker_id, worker_client) in worker_conns.iter_mut() {
+				worker_client
+					.on_new_job(context::current())
+					.await
+					.context("fail to call on_new_job()")?;
+			}
+			Ok(())
+		}));
 		futures::future::ready(())
 	}
 
@@ -308,7 +307,11 @@ impl Service for BrokerRPCServerImpl {
 	}
 
 	type UpdateWorkerStateFut = Pin<Box<dyn Future<Output = ()> + Send>>;
-	fn update_worker_state(self, _:context::Context, q_infos: Vec<QueueInfo>) -> Self::UpdateWorkerStateFut{
+	fn update_worker_state(
+		self,
+		_: context::Context,
+		q_infos: Vec<QueueInfo>,
+	) -> Self::UpdateWorkerStateFut {
 		Box::pin(async move {
 			let mut workers = self.broker.workers.lock().await;
 			if let Some(worker_info) = workers.get_mut(&self.session_id) {

@@ -104,7 +104,9 @@ impl Worker {
 		let log = slog_scope::logger();
 
 		info!(log, "[Worker] Connecting"; "broker_addr"=>&self.inner.broker_addr);
-		let stream = TcpStream::connect(&self.inner.broker_addr).compat().await
+		let stream = TcpStream::connect(&self.inner.broker_addr)
+			.compat()
+			.await
 			.context("Couldn't connect to broker")?;
 
 		let mux = yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Client);
@@ -115,12 +117,12 @@ impl Worker {
 			.context("[Worker] cannot open mux")?
 			.ok_or(failure::err_msg("[Worker] cannot open mux"))?; // client
 		let transport = tarpc_bincode_transport::new(stream);
-		let mut client = crate::broker::new_stub(
-			tarpc::client::Config::default(),
-			transport
-		).await
-		.context("cannot establish tarpc_bincode")?;
-		client.ping(context::current()).await
+		let mut client = crate::broker::new_stub(tarpc::client::Config::default(), transport)
+			.await
+			.context("cannot establish tarpc_bincode")?;
+		client
+			.ping(context::current())
+			.await
 			.context("test ping from worker to broker failed")?;
 
 		// server
@@ -164,7 +166,9 @@ impl Worker {
 								.unbounded_send(Message::TrySchedule)
 								.context("cannot enqueue msg")?;
 						}
-						client.job_update(context::current(), job_id, status).await
+						client
+							.job_update(context::current(), job_id, status)
+							.await
 							.context("cannot call job_update()")?;
 					}
 					Message::TrySchedule => {
@@ -172,12 +176,14 @@ impl Worker {
 						let queues = inner.queues.lock().await;
 						let mut available = inner.available.lock().await;
 						for (q_name, q) in queues.iter() {
-							if let Some(job) = client.job_request(
-								context::current(),
-								q_name.to_string(),
-								available.clone()
-							).await
-							.expect("[Worker] broker_client.job_request)_ failed")
+							if let Some(job) = client
+								.job_request(
+									context::current(),
+									q_name.to_string(),
+									available.clone(),
+								)
+								.await
+								.expect("[Worker] broker_client.job_request)_ failed")
 							{
 								info!(log, "[Worker] received new job");
 								// register job
@@ -199,7 +205,9 @@ impl Worker {
 						let queues = inner.queues.lock().await;
 						let q_infos = QueueInfo::vec_from_queues(&queues).await;
 						info!(log, "[Worker] msg: SendQueueInfos");
-						client.update_worker_state(context::current(), q_infos).await
+						client
+							.update_worker_state(context::current(), q_infos)
+							.await
 							.context("[Worker] fail update_worker_state()")?;
 					}
 				};
@@ -289,7 +297,8 @@ impl WorkerInner {
 
 			let status = child.compat().await.context("cannot wait child process")?;
 			Ok(status)
-		}.await;
+		}
+			.await;
 
 		let status = match result {
 			Ok(status) => {

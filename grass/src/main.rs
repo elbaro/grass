@@ -30,7 +30,7 @@ mod objects;
 mod oneshot;
 mod rpc;
 mod worker;
-use objects::{Job, JobSpecification, JobStatus, WorkerCapacity, ResourceRequirement};
+use objects::{Job, JobSpecification, JobStatus, ResourceRequirement, WorkerCapacity};
 use worker::QueueConfig;
 
 use app_dirs::{get_app_root, AppInfo};
