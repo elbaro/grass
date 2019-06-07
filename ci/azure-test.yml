@@ -5,10 +5,10 @@ jobs:
     matrix:
       Linux:
         vmImage: ubuntu-16.04
-        binary: ubuntu_16_04
+        binary: ubuntu-16_04
       MacOS:
         vmImage: macOS-10.14
-        binary: mac_mojave
+        binary: mac-mojave
       Windows:
         vmImage: windows-2019
         binary: windows

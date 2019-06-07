@@ -2,7 +2,7 @@ trigger: ["master"]
 pr: ["master"]
 
 variables:
-  nightly: nightly
+  nightly: nightly-2019-06-02
 
 jobs:
 # Check formatting
