@@ -14,3 +14,4 @@ jobs:
     - script: |
         cargo fmt --all -- --check
       displayName: Check formatting
+  continueOnError: true
