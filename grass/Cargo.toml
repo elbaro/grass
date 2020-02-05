@@ -39,7 +39,7 @@ futures01 = {package="futures",version="0.1.27"}
 futures-preview = {version="0.3.0-alpha.16", features = ["nightly", "async-await"]}
 tarpc = {git="https://github.com/elbaro/tarpc.git", features=["serde1"], branch="master"}
 tarpc-bincode-transport = {git="https://github.com/elbaro/tarpc.git", branch="master"}
-yamux = "0.2.1"
+yamux = "0.4.2"
 pin-utils = "0.1.0-alpha.4"
 slog-scope = "4.1.1"
 native-tls = "0.2.3"
